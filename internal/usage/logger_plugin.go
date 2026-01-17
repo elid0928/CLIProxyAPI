@@ -12,10 +12,14 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	log "github.com/sirupsen/logrus"
 )
 
 var statisticsEnabled atomic.Bool
+var mysqlPlugin *MySQLPlugin
+var mysqlPluginMu sync.Mutex
 
 func init() {
 	statisticsEnabled.Store(true)
@@ -469,4 +473,70 @@ func formatHour(hour int) string {
 	}
 	hour = hour % 24
 	return fmt.Sprintf("%02d", hour)
+}
+
+// InitializeMySQLPlugin initializes the MySQL persistence plugin if configured.
+// This should be called during application startup after config is loaded.
+func InitializeMySQLPlugin(cfg *config.Config) error {
+	if cfg == nil || !cfg.UsageMySQL.Enable {
+		return nil
+	}
+
+	mysqlPluginMu.Lock()
+	defer mysqlPluginMu.Unlock()
+
+	if mysqlPlugin != nil {
+		log.Warn("MySQL usage plugin already initialized")
+		return nil
+	}
+
+	// Build plugin config
+	pluginConfig := MySQLPluginConfig{
+		DSN:              cfg.UsageMySQL.DSN,
+		BatchSize:        cfg.UsageMySQL.BatchSize,
+		FlushInterval:    time.Duration(cfg.UsageMySQL.FlushIntervalSeconds) * time.Second,
+		LoadHistoryDays:  cfg.UsageMySQL.LoadHistoryDays,
+		EnableDailyStats: cfg.UsageMySQL.EnableDailyStats,
+	}
+
+	// Create and register plugin
+	plugin, err := NewMySQLPlugin(pluginConfig, defaultRequestStatistics)
+	if err != nil {
+		return fmt.Errorf("failed to initialize MySQL usage plugin: %w", err)
+	}
+
+	mysqlPlugin = plugin
+	coreusage.RegisterPlugin(plugin)
+
+	// Load historical data into memory
+	log.Info("Loading historical usage data from MySQL...")
+	if err := plugin.LoadHistoryIntoMemory(); err != nil {
+		log.Errorf("Failed to load historical data: %v", err)
+		// Don't fail initialization - just warn
+	}
+
+	log.Info("MySQL usage plugin initialized successfully")
+	return nil
+}
+
+// CloseMySQLPlugin gracefully shuts down the MySQL plugin.
+// This should be called during application shutdown.
+func CloseMySQLPlugin() error {
+	mysqlPluginMu.Lock()
+	defer mysqlPluginMu.Unlock()
+
+	if mysqlPlugin == nil {
+		return nil
+	}
+
+	err := mysqlPlugin.Close()
+	mysqlPlugin = nil
+	return err
+}
+
+// GetMySQLPlugin returns the active MySQL plugin instance if available.
+func GetMySQLPlugin() *MySQLPlugin {
+	mysqlPluginMu.Lock()
+	defer mysqlPluginMu.Unlock()
+	return mysqlPlugin
 }

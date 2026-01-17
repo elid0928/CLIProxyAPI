@@ -109,6 +109,9 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
+	// UsageMySQL defines MySQL persistence configuration for usage statistics.
+	UsageMySQL UsageMySQLConfig `yaml:"usage-mysql" json:"usage-mysql"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
@@ -143,6 +146,22 @@ type QuotaExceeded struct {
 
 	// SwitchPreviewModel indicates whether to automatically switch to a preview model when a quota is exceeded.
 	SwitchPreviewModel bool `yaml:"switch-preview-model" json:"switch-preview-model"`
+}
+
+// UsageMySQLConfig holds MySQL persistence configuration for usage statistics.
+type UsageMySQLConfig struct {
+	// Enable toggles MySQL persistence for usage statistics.
+	Enable bool `yaml:"enable" json:"enable"`
+	// DSN is the MySQL connection string (e.g., "user:password@tcp(127.0.0.1:3306)/dbname?parseTime=true").
+	DSN string `yaml:"dsn" json:"-"` // Omit from JSON to avoid exposing credentials
+	// BatchSize is the number of records to batch before inserting (default: 100).
+	BatchSize int `yaml:"batch-size" json:"batch-size"`
+	// FlushInterval is the maximum time to wait before flushing batch (default: 5s).
+	FlushIntervalSeconds int `yaml:"flush-interval-seconds" json:"flush-interval-seconds"`
+	// LoadHistoryDays is the number of days of history to load on startup (0 = all history).
+	LoadHistoryDays int `yaml:"load-history-days" json:"load-history-days"`
+	// EnableDailyStats toggles maintenance of pre-aggregated daily statistics table.
+	EnableDailyStats bool `yaml:"enable-daily-stats" json:"enable-daily-stats"`
 }
 
 // RoutingConfig configures how credentials are selected for requests.

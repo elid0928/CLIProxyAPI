@@ -53,6 +53,22 @@ logs-max-total-size-mb: 0
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
 
+# MySQL persistence for usage statistics (optional)
+# When enabled, usage records are automatically persisted to MySQL database
+# and historical data is loaded into memory on startup
+# usage-mysql:
+#   enable: false
+#   # MySQL connection string (format: user:password@tcp(host:port)/database?parseTime=true)
+#   dsn: "root:password@tcp(127.0.0.1:3306)/cliproxy?parseTime=true&loc=Local"
+#   # Number of records to batch before inserting (default: 100)
+#   batch-size: 100
+#   # Maximum seconds to wait before flushing batch (default: 5)
+#   flush-interval-seconds: 5
+#   # Number of days of history to load on startup (0 = all history, default: 30)
+#   load-history-days: 30
+#   # Whether to maintain pre-aggregated daily statistics table for faster queries
+#   enable-daily-stats: true
+
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 proxy-url: ""
 
