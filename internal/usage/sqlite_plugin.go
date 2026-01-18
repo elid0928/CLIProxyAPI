@@ -4,17 +4,19 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/mattn/go-sqlite3"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
 
-// MySQLPluginConfig holds the configuration for MySQL persistence
-type MySQLPluginConfig struct {
-	DSN              string        // MySQL connection string
+// SQLitePluginConfig holds the configuration for SQLite persistence
+type SQLitePluginConfig struct {
+	DBPath           string        // Path to SQLite database file
 	BatchSize        int           // Number of records to batch before insert
 	FlushInterval    time.Duration // Maximum time to wait before flushing batch
 	MaxRetries       int           // Maximum retry attempts for failed inserts
@@ -22,22 +24,10 @@ type MySQLPluginConfig struct {
 	EnableDailyStats bool          // Whether to maintain daily aggregated stats
 }
 
-// maskAPIKey masks an API key for storage, preserving first 4 and last 4 characters
-// Example: "sk-abc123xyz789" -> "sk-a****789"
-func maskAPIKey(apiKey string) string {
-	if len(apiKey) <= 8 {
-		// Too short to mask meaningfully, return all masked
-		return "****"
-	}
-	prefix := apiKey[:4]
-	suffix := apiKey[len(apiKey)-4:]
-	return prefix + "****" + suffix
-}
-
-// MySQLPlugin implements usage.Plugin to persist records to MySQL
-type MySQLPlugin struct {
+// SQLitePlugin implements usage.Plugin to persist records to SQLite
+type SQLitePlugin struct {
 	db     *sql.DB
-	config MySQLPluginConfig
+	config SQLitePluginConfig
 
 	// Batch processing
 	mu            sync.Mutex
@@ -55,10 +45,10 @@ type MySQLPlugin struct {
 	stats *RequestStatistics
 }
 
-// NewMySQLPlugin creates a new MySQL persistence plugin
-func NewMySQLPlugin(config MySQLPluginConfig, stats *RequestStatistics) (*MySQLPlugin, error) {
-	if config.DSN == "" {
-		return nil, fmt.Errorf("MySQL DSN is required")
+// NewSQLitePlugin creates a new SQLite persistence plugin
+func NewSQLitePlugin(config SQLitePluginConfig, stats *RequestStatistics) (*SQLitePlugin, error) {
+	if config.DBPath == "" {
+		return nil, fmt.Errorf("SQLite database path is required")
 	}
 
 	// Set defaults
@@ -72,29 +62,50 @@ func NewMySQLPlugin(config MySQLPluginConfig, stats *RequestStatistics) (*MySQLP
 		config.MaxRetries = 3
 	}
 
+	// Expand ~ to home directory
+	if config.DBPath[:2] == "~/" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get home directory: %w", err)
+		}
+		config.DBPath = filepath.Join(homeDir, config.DBPath[2:])
+	}
+
+	// Create directory if it doesn't exist
+	dbDir := filepath.Dir(config.DBPath)
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create database directory: %w", err)
+	}
+
 	// Open database connection
-	db, err := sql.Open("mysql", config.DSN)
+	db, err := sql.Open("sqlite3", config.DBPath+"?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&_cache_size=1000000000")
 	if err != nil {
-		return nil, fmt.Errorf("failed to open MySQL connection: %w", err)
+		return nil, fmt.Errorf("failed to open SQLite connection: %w", err)
 	}
 
 	// Configure connection pool
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(5 * time.Minute)
+	db.SetMaxOpenConns(1) // SQLite works best with single writer
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0) // No limit
 
 	// Test connection
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("failed to ping MySQL: %w", err)
+		return nil, fmt.Errorf("failed to ping SQLite: %w", err)
 	}
 
-	log.Infof("MySQL usage plugin connected to database")
+	// Initialize schema
+	if err := initializeSQLiteSchema(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to initialize schema: %w", err)
+	}
+
+	log.Infof("SQLite usage plugin connected to database: %s", config.DBPath)
 
 	ctx, cancel = context.WithCancel(context.Background())
-	plugin := &MySQLPlugin{
+	plugin := &SQLitePlugin{
 		db:     db,
 		config: config,
 		batch:  make([]coreusage.Record, 0, config.BatchSize),
@@ -110,8 +121,65 @@ func NewMySQLPlugin(config MySQLPluginConfig, stats *RequestStatistics) (*MySQLP
 	return plugin, nil
 }
 
+// initializeSQLiteSchema creates tables and indexes if they don't exist
+func initializeSQLiteSchema(db *sql.DB) error {
+	schema := `
+	CREATE TABLE IF NOT EXISTS usage_records (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		provider TEXT NOT NULL DEFAULT '',
+		model TEXT NOT NULL DEFAULT '',
+		api_key TEXT NOT NULL DEFAULT '',
+		source TEXT NOT NULL DEFAULT '',
+		auth_id TEXT NOT NULL DEFAULT '',
+		auth_index TEXT NOT NULL DEFAULT '',
+		requested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		failed INTEGER NOT NULL DEFAULT 0,
+		input_tokens INTEGER NOT NULL DEFAULT 0,
+		output_tokens INTEGER NOT NULL DEFAULT 0,
+		reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+		cached_tokens INTEGER NOT NULL DEFAULT 0,
+		total_tokens INTEGER NOT NULL DEFAULT 0,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_requested_at ON usage_records(requested_at);
+	CREATE INDEX IF NOT EXISTS idx_api_key ON usage_records(api_key);
+	CREATE INDEX IF NOT EXISTS idx_model ON usage_records(model);
+	CREATE INDEX IF NOT EXISTS idx_provider ON usage_records(provider);
+	CREATE INDEX IF NOT EXISTS idx_failed ON usage_records(failed);
+	CREATE INDEX IF NOT EXISTS idx_composite_date_model ON usage_records(requested_at, model);
+	CREATE INDEX IF NOT EXISTS idx_composite_api_model ON usage_records(api_key, model, requested_at);
+
+	CREATE TABLE IF NOT EXISTS usage_daily_stats (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		stat_date TEXT NOT NULL,
+		api_key TEXT NOT NULL DEFAULT '',
+		model TEXT NOT NULL DEFAULT '',
+		provider TEXT NOT NULL DEFAULT '',
+		total_requests INTEGER NOT NULL DEFAULT 0,
+		success_requests INTEGER NOT NULL DEFAULT 0,
+		failed_requests INTEGER NOT NULL DEFAULT 0,
+		total_tokens INTEGER NOT NULL DEFAULT 0,
+		input_tokens INTEGER NOT NULL DEFAULT 0,
+		output_tokens INTEGER NOT NULL DEFAULT 0,
+		reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+		cached_tokens INTEGER NOT NULL DEFAULT 0,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_stats_unique
+	ON usage_daily_stats(stat_date, api_key, model, provider);
+
+	CREATE INDEX IF NOT EXISTS idx_daily_stats_date ON usage_daily_stats(stat_date);
+	`
+
+	_, err := db.Exec(schema)
+	return err
+}
+
 // HandleUsage implements coreusage.Plugin
-func (p *MySQLPlugin) HandleUsage(ctx context.Context, record coreusage.Record) {
+func (p *SQLitePlugin) HandleUsage(ctx context.Context, record coreusage.Record) {
 	if p == nil {
 		return
 	}
@@ -142,14 +210,14 @@ func (p *MySQLPlugin) HandleUsage(ctx context.Context, record coreusage.Record) 
 }
 
 // flush performs a batch insert (thread-safe)
-func (p *MySQLPlugin) flush() {
+func (p *SQLitePlugin) flush() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.flushLocked()
 }
 
 // flushLocked performs a batch insert (caller must hold lock)
-func (p *MySQLPlugin) flushLocked() {
+func (p *SQLitePlugin) flushLocked() {
 	if len(p.batch) == 0 {
 		return
 	}
@@ -165,7 +233,7 @@ func (p *MySQLPlugin) flushLocked() {
 }
 
 // insertBatch inserts a batch of records with retry logic
-func (p *MySQLPlugin) insertBatch(batch []coreusage.Record) {
+func (p *SQLitePlugin) insertBatch(batch []coreusage.Record) {
 	if len(batch) == 0 {
 		return
 	}
@@ -176,7 +244,7 @@ func (p *MySQLPlugin) insertBatch(batch []coreusage.Record) {
 			// Exponential backoff
 			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
 			time.Sleep(backoff)
-			log.Warnf("MySQL usage plugin: retrying batch insert (attempt %d/%d)", attempt+1, p.config.MaxRetries)
+			log.Warnf("SQLite usage plugin: retrying batch insert (attempt %d/%d)", attempt+1, p.config.MaxRetries)
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -185,40 +253,48 @@ func (p *MySQLPlugin) insertBatch(batch []coreusage.Record) {
 
 		if err == nil {
 			if attempt > 0 {
-				log.Infof("MySQL usage plugin: batch insert succeeded after %d retries", attempt)
+				log.Infof("SQLite usage plugin: batch insert succeeded after %d retries", attempt)
 			}
 			return
 		}
 
 		lastErr = err
-		log.Errorf("MySQL usage plugin: batch insert failed (attempt %d/%d): %v", attempt+1, p.config.MaxRetries, err)
+		log.Errorf("SQLite usage plugin: batch insert failed (attempt %d/%d): %v", attempt+1, p.config.MaxRetries, err)
 	}
 
-	log.Errorf("MySQL usage plugin: failed to insert batch after %d attempts: %v", p.config.MaxRetries, lastErr)
+	log.Errorf("SQLite usage plugin: failed to insert batch after %d attempts: %v", p.config.MaxRetries, lastErr)
 }
 
 // executeBatchInsert performs the actual batch insert
-func (p *MySQLPlugin) executeBatchInsert(ctx context.Context, batch []coreusage.Record) error {
+func (p *SQLitePlugin) executeBatchInsert(ctx context.Context, batch []coreusage.Record) error {
 	if len(batch) == 0 {
 		return nil
 	}
 
-	// Build batch insert query
-	query := `INSERT INTO usage_records (
+	// Start transaction for better performance
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Prepare statement
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO usage_records (
 		provider, model, api_key, source, auth_id, auth_index,
 		requested_at, failed,
 		input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens
-	) VALUES `
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare statement: %w", err)
+	}
+	defer stmt.Close()
 
-	values := make([]interface{}, 0, len(batch)*13)
-	placeholders := make([]string, 0, len(batch))
-
+	// Insert all records
 	for _, record := range batch {
-		placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-		values = append(values,
+		_, err := stmt.ExecContext(ctx,
 			record.Provider,
 			record.Model,
-			maskAPIKey(record.APIKey),
+			record.APIKey,
 			record.Source,
 			record.AuthID,
 			record.AuthIndex,
@@ -230,21 +306,17 @@ func (p *MySQLPlugin) executeBatchInsert(ctx context.Context, batch []coreusage.
 			record.Detail.CachedTokens,
 			record.Detail.TotalTokens,
 		)
+		if err != nil {
+			return fmt.Errorf("failed to insert record: %w", err)
+		}
 	}
 
-	query += placeholders[0]
-	for i := 1; i < len(placeholders); i++ {
-		query += ", " + placeholders[i]
+	// Commit transaction
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	// Execute batch insert
-	result, err := p.db.ExecContext(ctx, query, values...)
-	if err != nil {
-		return fmt.Errorf("batch insert failed: %w", err)
-	}
-
-	affected, _ := result.RowsAffected()
-	log.Debugf("MySQL usage plugin: inserted %d records", affected)
+	log.Debugf("SQLite usage plugin: inserted %d records", len(batch))
 
 	// Update daily stats if enabled
 	if p.config.EnableDailyStats {
@@ -255,7 +327,7 @@ func (p *MySQLPlugin) executeBatchInsert(ctx context.Context, batch []coreusage.
 }
 
 // updateDailyStats updates the aggregated daily statistics table
-func (p *MySQLPlugin) updateDailyStats(batch []coreusage.Record) {
+func (p *SQLitePlugin) updateDailyStats(batch []coreusage.Record) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -267,16 +339,16 @@ func (p *MySQLPlugin) updateDailyStats(batch []coreusage.Record) {
 			total_requests, success_requests, failed_requests,
 			total_tokens, input_tokens, output_tokens, reasoning_tokens, cached_tokens
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
-			total_requests = total_requests + VALUES(total_requests),
-			success_requests = success_requests + VALUES(success_requests),
-			failed_requests = failed_requests + VALUES(failed_requests),
-			total_tokens = total_tokens + VALUES(total_tokens),
-			input_tokens = input_tokens + VALUES(input_tokens),
-			output_tokens = output_tokens + VALUES(output_tokens),
-			reasoning_tokens = reasoning_tokens + VALUES(reasoning_tokens),
-			cached_tokens = cached_tokens + VALUES(cached_tokens),
-			updated_at = NOW(3)`
+		ON CONFLICT(stat_date, api_key, model, provider) DO UPDATE SET
+			total_requests = total_requests + excluded.total_requests,
+			success_requests = success_requests + excluded.success_requests,
+			failed_requests = failed_requests + excluded.failed_requests,
+			total_tokens = total_tokens + excluded.total_tokens,
+			input_tokens = input_tokens + excluded.input_tokens,
+			output_tokens = output_tokens + excluded.output_tokens,
+			reasoning_tokens = reasoning_tokens + excluded.reasoning_tokens,
+			cached_tokens = cached_tokens + excluded.cached_tokens,
+			updated_at = CURRENT_TIMESTAMP`
 
 		successReq := 0
 		failedReq := 0
@@ -287,7 +359,7 @@ func (p *MySQLPlugin) updateDailyStats(batch []coreusage.Record) {
 		}
 
 		_, err := p.db.ExecContext(ctx, query,
-			statDate, maskAPIKey(record.APIKey), record.Model, record.Provider,
+			statDate, record.APIKey, record.Model, record.Provider,
 			1, successReq, failedReq,
 			record.Detail.TotalTokens,
 			record.Detail.InputTokens,
@@ -297,13 +369,13 @@ func (p *MySQLPlugin) updateDailyStats(batch []coreusage.Record) {
 		)
 
 		if err != nil {
-			log.Errorf("MySQL usage plugin: failed to update daily stats: %v", err)
+			log.Errorf("SQLite usage plugin: failed to update daily stats: %v", err)
 		}
 	}
 }
 
 // flushWorker runs in background to ensure periodic flushes
-func (p *MySQLPlugin) flushWorker() {
+func (p *SQLitePlugin) flushWorker() {
 	defer p.wg.Done()
 
 	ticker := time.NewTicker(p.config.FlushInterval)
@@ -321,8 +393,8 @@ func (p *MySQLPlugin) flushWorker() {
 	}
 }
 
-// LoadHistoryIntoMemory loads historical data from MySQL into in-memory statistics
-func (p *MySQLPlugin) LoadHistoryIntoMemory() error {
+// LoadHistoryIntoMemory loads historical data from SQLite into in-memory statistics
+func (p *SQLitePlugin) LoadHistoryIntoMemory() error {
 	if p.stats == nil {
 		return fmt.Errorf("in-memory statistics not available")
 	}
@@ -338,7 +410,7 @@ func (p *MySQLPlugin) LoadHistoryIntoMemory() error {
 
 	args := []interface{}{}
 	if p.config.LoadHistoryDays > 0 {
-		query += ` WHERE requested_at >= DATE_SUB(NOW(), INTERVAL ? DAY)`
+		query += ` WHERE requested_at >= datetime('now', '-' || ? || ' days')`
 		args = append(args, p.config.LoadHistoryDays)
 	}
 
@@ -353,6 +425,7 @@ func (p *MySQLPlugin) LoadHistoryIntoMemory() error {
 	loadedCount := 0
 	for rows.Next() {
 		var record coreusage.Record
+		var requestedAt string
 		err := rows.Scan(
 			&record.Provider,
 			&record.Model,
@@ -360,7 +433,7 @@ func (p *MySQLPlugin) LoadHistoryIntoMemory() error {
 			&record.Source,
 			&record.AuthID,
 			&record.AuthIndex,
-			&record.RequestedAt,
+			&requestedAt,
 			&record.Failed,
 			&record.Detail.InputTokens,
 			&record.Detail.OutputTokens,
@@ -369,8 +442,19 @@ func (p *MySQLPlugin) LoadHistoryIntoMemory() error {
 			&record.Detail.TotalTokens,
 		)
 		if err != nil {
-			log.Errorf("MySQL usage plugin: failed to scan row: %v", err)
+			log.Errorf("SQLite usage plugin: failed to scan row: %v", err)
 			continue
+		}
+
+		// Parse timestamp
+		record.RequestedAt, err = time.Parse("2006-01-02 15:04:05", requestedAt)
+		if err != nil {
+			// Try alternative format
+			record.RequestedAt, err = time.Parse(time.RFC3339, requestedAt)
+			if err != nil {
+				log.Errorf("SQLite usage plugin: failed to parse timestamp: %v", err)
+				continue
+			}
 		}
 
 		// Convert to in-memory format and record
@@ -382,12 +466,12 @@ func (p *MySQLPlugin) LoadHistoryIntoMemory() error {
 		return fmt.Errorf("error iterating rows: %w", err)
 	}
 
-	log.Infof("MySQL usage plugin: loaded %d historical records into memory", loadedCount)
+	log.Infof("SQLite usage plugin: loaded %d historical records into memory", loadedCount)
 	return nil
 }
 
 // Close gracefully shuts down the plugin
-func (p *MySQLPlugin) Close() error {
+func (p *SQLitePlugin) Close() error {
 	if p == nil {
 		return nil
 	}
@@ -415,16 +499,16 @@ func (p *MySQLPlugin) Close() error {
 	// Close database connection
 	if p.db != nil {
 		if err := p.db.Close(); err != nil {
-			return fmt.Errorf("failed to close MySQL connection: %w", err)
+			return fmt.Errorf("failed to close SQLite connection: %w", err)
 		}
 	}
 
-	log.Info("MySQL usage plugin closed")
+	log.Info("SQLite usage plugin closed")
 	return nil
 }
 
 // GetDailyStats retrieves aggregated daily statistics
-func (p *MySQLPlugin) GetDailyStats(ctx context.Context, startDate, endDate time.Time) ([]DailyStats, error) {
+func (p *SQLitePlugin) GetDailyStats(ctx context.Context, startDate, endDate time.Time) ([]DailyStats, error) {
 	query := `SELECT
 		stat_date, api_key, model, provider,
 		total_requests, success_requests, failed_requests,
@@ -463,20 +547,4 @@ func (p *MySQLPlugin) GetDailyStats(ctx context.Context, startDate, endDate time
 	}
 
 	return results, rows.Err()
-}
-
-// DailyStats represents aggregated statistics for a day
-type DailyStats struct {
-	Date            string `json:"date"`
-	APIKey          string `json:"api_key"`
-	Model           string `json:"model"`
-	Provider        string `json:"provider"`
-	TotalRequests   int64  `json:"total_requests"`
-	SuccessRequests int64  `json:"success_requests"`
-	FailedRequests  int64  `json:"failed_requests"`
-	TotalTokens     int64  `json:"total_tokens"`
-	InputTokens     int64  `json:"input_tokens"`
-	OutputTokens    int64  `json:"output_tokens"`
-	ReasoningTokens int64  `json:"reasoning_tokens"`
-	CachedTokens    int64  `json:"cached_tokens"`
 }

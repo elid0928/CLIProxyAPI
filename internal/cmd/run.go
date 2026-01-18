@@ -32,10 +32,19 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 		// Don't fail startup - continue without MySQL persistence
 	}
 
-	// Ensure MySQL plugin is closed on shutdown
+	// Initialize SQLite usage plugin if configured
+	if err := usage.InitializeSQLitePlugin(cfg); err != nil {
+		log.Errorf("failed to initialize SQLite usage plugin: %v", err)
+		// Don't fail startup - continue without SQLite persistence
+	}
+
+	// Ensure plugins are closed on shutdown
 	defer func() {
 		if err := usage.CloseMySQLPlugin(); err != nil {
 			log.Errorf("failed to close MySQL usage plugin: %v", err)
+		}
+		if err := usage.CloseSQLitePlugin(); err != nil {
+			log.Errorf("failed to close SQLite usage plugin: %v", err)
 		}
 	}()
 

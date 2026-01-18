@@ -69,6 +69,22 @@ usage-statistics-enabled: false
 #   # Whether to maintain pre-aggregated daily statistics table for faster queries
 #   enable-daily-stats: true
 
+# SQLite persistence for usage statistics (optional, alternative to MySQL)
+# When enabled, usage records are automatically persisted to SQLite database
+# and historical data is loaded into memory on startup
+# usage-sqlite:
+#   enable: false
+#   # Path to SQLite database file (supports ~ for home directory)
+#   db-path: "~/.cli-proxy-api/usage.db"
+#   # Number of records to batch before inserting (default: 100)
+#   batch-size: 100
+#   # Maximum seconds to wait before flushing batch (default: 5)
+#   flush-interval-seconds: 5
+#   # Number of days of history to load on startup (0 = all history, default: 30)
+#   load-history-days: 30
+#   # Whether to maintain pre-aggregated daily statistics table for faster queries
+#   enable-daily-stats: true
+
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 proxy-url: ""
 

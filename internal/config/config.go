@@ -112,6 +112,9 @@ type Config struct {
 	// UsageMySQL defines MySQL persistence configuration for usage statistics.
 	UsageMySQL UsageMySQLConfig `yaml:"usage-mysql" json:"usage-mysql"`
 
+	// UsageSQLite defines SQLite persistence configuration for usage statistics.
+	UsageSQLite UsageSQLiteConfig `yaml:"usage-sqlite" json:"usage-sqlite"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
@@ -154,6 +157,22 @@ type UsageMySQLConfig struct {
 	Enable bool `yaml:"enable" json:"enable"`
 	// DSN is the MySQL connection string (e.g., "user:password@tcp(127.0.0.1:3306)/dbname?parseTime=true").
 	DSN string `yaml:"dsn" json:"-"` // Omit from JSON to avoid exposing credentials
+	// BatchSize is the number of records to batch before inserting (default: 100).
+	BatchSize int `yaml:"batch-size" json:"batch-size"`
+	// FlushInterval is the maximum time to wait before flushing batch (default: 5s).
+	FlushIntervalSeconds int `yaml:"flush-interval-seconds" json:"flush-interval-seconds"`
+	// LoadHistoryDays is the number of days of history to load on startup (0 = all history).
+	LoadHistoryDays int `yaml:"load-history-days" json:"load-history-days"`
+	// EnableDailyStats toggles maintenance of pre-aggregated daily statistics table.
+	EnableDailyStats bool `yaml:"enable-daily-stats" json:"enable-daily-stats"`
+}
+
+// UsageSQLiteConfig holds SQLite persistence configuration for usage statistics.
+type UsageSQLiteConfig struct {
+	// Enable toggles SQLite persistence for usage statistics.
+	Enable bool `yaml:"enable" json:"enable"`
+	// DBPath is the path to the SQLite database file (supports ~ for home directory).
+	DBPath string `yaml:"db-path" json:"db-path"`
 	// BatchSize is the number of records to batch before inserting (default: 100).
 	BatchSize int `yaml:"batch-size" json:"batch-size"`
 	// FlushInterval is the maximum time to wait before flushing batch (default: 5s).

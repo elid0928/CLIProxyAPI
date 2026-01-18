@@ -20,6 +20,8 @@ import (
 var statisticsEnabled atomic.Bool
 var mysqlPlugin *MySQLPlugin
 var mysqlPluginMu sync.Mutex
+var sqlitePlugin *SQLitePlugin
+var sqlitePluginMu sync.Mutex
 
 func init() {
 	statisticsEnabled.Store(true)
@@ -539,4 +541,70 @@ func GetMySQLPlugin() *MySQLPlugin {
 	mysqlPluginMu.Lock()
 	defer mysqlPluginMu.Unlock()
 	return mysqlPlugin
+}
+
+// InitializeSQLitePlugin initializes the SQLite persistence plugin if configured.
+// This should be called during application startup after config is loaded.
+func InitializeSQLitePlugin(cfg *config.Config) error {
+	if cfg == nil || !cfg.UsageSQLite.Enable {
+		return nil
+	}
+
+	sqlitePluginMu.Lock()
+	defer sqlitePluginMu.Unlock()
+
+	if sqlitePlugin != nil {
+		log.Warn("SQLite usage plugin already initialized")
+		return nil
+	}
+
+	// Build plugin config
+	pluginConfig := SQLitePluginConfig{
+		DBPath:           cfg.UsageSQLite.DBPath,
+		BatchSize:        cfg.UsageSQLite.BatchSize,
+		FlushInterval:    time.Duration(cfg.UsageSQLite.FlushIntervalSeconds) * time.Second,
+		LoadHistoryDays:  cfg.UsageSQLite.LoadHistoryDays,
+		EnableDailyStats: cfg.UsageSQLite.EnableDailyStats,
+	}
+
+	// Create and register plugin
+	plugin, err := NewSQLitePlugin(pluginConfig, defaultRequestStatistics)
+	if err != nil {
+		return fmt.Errorf("failed to initialize SQLite usage plugin: %w", err)
+	}
+
+	sqlitePlugin = plugin
+	coreusage.RegisterPlugin(plugin)
+
+	// Load historical data into memory
+	log.Info("Loading historical usage data from SQLite...")
+	if err := plugin.LoadHistoryIntoMemory(); err != nil {
+		log.Errorf("Failed to load historical data: %v", err)
+		// Don't fail initialization - just warn
+	}
+
+	log.Info("SQLite usage plugin initialized successfully")
+	return nil
+}
+
+// CloseSQLitePlugin gracefully shuts down the SQLite plugin.
+// This should be called during application shutdown.
+func CloseSQLitePlugin() error {
+	sqlitePluginMu.Lock()
+	defer sqlitePluginMu.Unlock()
+
+	if sqlitePlugin == nil {
+		return nil
+	}
+
+	err := sqlitePlugin.Close()
+	sqlitePlugin = nil
+	return err
+}
+
+// GetSQLitePlugin returns the active SQLite plugin instance if available.
+func GetSQLitePlugin() *SQLitePlugin {
+	sqlitePluginMu.Lock()
+	defer sqlitePluginMu.Unlock()
+	return sqlitePlugin
 }
