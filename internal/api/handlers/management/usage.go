@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -20,12 +21,33 @@ type usageImportPayload struct {
 	Usage   usage.StatisticsSnapshot `json:"usage"`
 }
 
-// GetUsageStatistics returns the in-memory request statistics snapshot.
-func (h *Handler) GetUsageStatistics(c *gin.Context) {
-	var snapshot usage.StatisticsSnapshot
-	if h != nil && h.usageStats != nil {
-		snapshot = h.usageStats.Snapshot()
+// getSnapshot retrieves the statistics snapshot from backend storage if available,
+// otherwise uses in-memory statistics only when no backend storage is configured.
+func (h *Handler) getSnapshot(ctx context.Context) usage.StatisticsSnapshot {
+	// When backend storage is configured, always use it
+	if usage.HasBackendStorage() {
+		snapshot, err := usage.GetBackendSnapshot(ctx)
+		if err != nil {
+			// Return empty snapshot on error, do not fall back to memory
+			return usage.StatisticsSnapshot{}
+		}
+		if snapshot != nil {
+			return *snapshot
+		}
+		return usage.StatisticsSnapshot{}
 	}
+
+	// Only use in-memory statistics when no backend storage is configured
+	if h != nil && h.usageStats != nil {
+		return h.usageStats.Snapshot()
+	}
+	return usage.StatisticsSnapshot{}
+}
+
+// GetUsageStatistics returns the request statistics snapshot.
+// When a backend storage plugin is available, data is fetched from the database.
+func (h *Handler) GetUsageStatistics(c *gin.Context) {
+	snapshot := h.getSnapshot(c.Request.Context())
 	c.JSON(http.StatusOK, gin.H{
 		"usage":           snapshot,
 		"failed_requests": snapshot.FailureCount,
@@ -33,11 +55,9 @@ func (h *Handler) GetUsageStatistics(c *gin.Context) {
 }
 
 // ExportUsageStatistics returns a complete usage snapshot for backup/migration.
+// When a backend storage plugin is available, data is fetched from the database.
 func (h *Handler) ExportUsageStatistics(c *gin.Context) {
-	var snapshot usage.StatisticsSnapshot
-	if h != nil && h.usageStats != nil {
-		snapshot = h.usageStats.Snapshot()
-	}
+	snapshot := h.getSnapshot(c.Request.Context())
 	c.JSON(http.StatusOK, usageExportPayload{
 		Version:    1,
 		ExportedAt: time.Now().UTC(),

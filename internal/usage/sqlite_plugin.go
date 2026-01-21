@@ -507,6 +507,132 @@ func (p *SQLitePlugin) Close() error {
 	return nil
 }
 
+// GetSnapshot retrieves a complete statistics snapshot from the database.
+// This queries the database directly rather than returning in-memory data.
+func (p *SQLitePlugin) GetSnapshot(ctx context.Context) (StatisticsSnapshot, error) {
+	result := StatisticsSnapshot{
+		APIs:           make(map[string]APISnapshot),
+		RequestsByDay:  make(map[string]int64),
+		RequestsByHour: make(map[string]int64),
+		TokensByDay:    make(map[string]int64),
+		TokensByHour:   make(map[string]int64),
+	}
+
+	if p == nil || p.db == nil {
+		return result, fmt.Errorf("SQLite plugin not initialized")
+	}
+
+	// Query total statistics
+	var totalRequests, successCount, failureCount, totalTokens int64
+	err := p.db.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*) as total_requests,
+			SUM(CASE WHEN failed = 0 THEN 1 ELSE 0 END) as success_count,
+			SUM(CASE WHEN failed = 1 THEN 1 ELSE 0 END) as failure_count,
+			COALESCE(SUM(total_tokens), 0) as total_tokens
+		FROM usage_records
+	`).Scan(&totalRequests, &successCount, &failureCount, &totalTokens)
+	if err != nil {
+		return result, fmt.Errorf("failed to query total stats: %w", err)
+	}
+
+	result.TotalRequests = totalRequests
+	result.SuccessCount = successCount
+	result.FailureCount = failureCount
+	result.TotalTokens = totalTokens
+
+	// Query statistics by API key and model
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT
+			api_key,
+			model,
+			COUNT(*) as total_requests,
+			COALESCE(SUM(total_tokens), 0) as total_tokens
+		FROM usage_records
+		GROUP BY api_key, model
+	`)
+	if err != nil {
+		return result, fmt.Errorf("failed to query API stats: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var apiKey, model string
+		var reqCount, tokens int64
+		if err := rows.Scan(&apiKey, &model, &reqCount, &tokens); err != nil {
+			log.Errorf("SQLite plugin: failed to scan API stats row: %v", err)
+			continue
+		}
+
+		apiSnapshot, exists := result.APIs[apiKey]
+		if !exists {
+			apiSnapshot = APISnapshot{
+				Models: make(map[string]ModelSnapshot),
+			}
+		}
+		apiSnapshot.TotalRequests += reqCount
+		apiSnapshot.TotalTokens += tokens
+		apiSnapshot.Models[model] = ModelSnapshot{
+			TotalRequests: reqCount,
+			TotalTokens:   tokens,
+		}
+		result.APIs[apiKey] = apiSnapshot
+	}
+
+	// Query requests by day
+	dayRows, err := p.db.QueryContext(ctx, `
+		SELECT
+			DATE(requested_at) as day,
+			COUNT(*) as requests,
+			COALESCE(SUM(total_tokens), 0) as tokens
+		FROM usage_records
+		GROUP BY DATE(requested_at)
+	`)
+	if err != nil {
+		return result, fmt.Errorf("failed to query daily stats: %w", err)
+	}
+	defer dayRows.Close()
+
+	for dayRows.Next() {
+		var day string
+		var requests, tokens int64
+		if err := dayRows.Scan(&day, &requests, &tokens); err != nil {
+			log.Errorf("SQLite plugin: failed to scan daily stats row: %v", err)
+			continue
+		}
+		result.RequestsByDay[day] = requests
+		result.TokensByDay[day] = tokens
+	}
+
+	// Query requests by hour
+	hourRows, err := p.db.QueryContext(ctx, `
+		SELECT
+			CAST(strftime('%H', requested_at) AS INTEGER) as hour,
+			COUNT(*) as requests,
+			COALESCE(SUM(total_tokens), 0) as tokens
+		FROM usage_records
+		GROUP BY strftime('%H', requested_at)
+	`)
+	if err != nil {
+		return result, fmt.Errorf("failed to query hourly stats: %w", err)
+	}
+	defer hourRows.Close()
+
+	for hourRows.Next() {
+		var hour int
+		var requests, tokens int64
+		if err := hourRows.Scan(&hour, &requests, &tokens); err != nil {
+			log.Errorf("SQLite plugin: failed to scan hourly stats row: %v", err)
+			continue
+		}
+		hourKey := fmt.Sprintf("%02d", hour)
+		result.RequestsByHour[hourKey] = requests
+		result.TokensByHour[hourKey] = tokens
+	}
+
+	return result, nil
+}
+
 // GetDailyStats retrieves aggregated daily statistics
 func (p *SQLitePlugin) GetDailyStats(ctx context.Context, startDate, endDate time.Time) ([]DailyStats, error) {
 	query := `SELECT

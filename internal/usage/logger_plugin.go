@@ -608,3 +608,52 @@ func GetSQLitePlugin() *SQLitePlugin {
 	defer sqlitePluginMu.Unlock()
 	return sqlitePlugin
 }
+
+// GetBackendSnapshot returns a statistics snapshot from the backend storage plugin if available.
+// It checks MySQL first, then SQLite. Returns nil if no backend plugin is configured.
+func GetBackendSnapshot(ctx context.Context) (*StatisticsSnapshot, error) {
+	// Check MySQL first
+	mysqlPluginMu.Lock()
+	mp := mysqlPlugin
+	mysqlPluginMu.Unlock()
+
+	if mp != nil {
+		snapshot, err := mp.GetSnapshot(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get MySQL snapshot: %w", err)
+		}
+		return &snapshot, nil
+	}
+
+	// Check SQLite
+	sqlitePluginMu.Lock()
+	sp := sqlitePlugin
+	sqlitePluginMu.Unlock()
+
+	if sp != nil {
+		snapshot, err := sp.GetSnapshot(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get SQLite snapshot: %w", err)
+		}
+		return &snapshot, nil
+	}
+
+	return nil, nil
+}
+
+// HasBackendStorage returns true if a backend storage plugin (MySQL or SQLite) is configured.
+func HasBackendStorage() bool {
+	mysqlPluginMu.Lock()
+	hasMysql := mysqlPlugin != nil
+	mysqlPluginMu.Unlock()
+
+	if hasMysql {
+		return true
+	}
+
+	sqlitePluginMu.Lock()
+	hasSqlite := sqlitePlugin != nil
+	sqlitePluginMu.Unlock()
+
+	return hasSqlite
+}
