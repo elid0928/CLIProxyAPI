@@ -575,8 +575,77 @@ func (p *SQLitePlugin) GetSnapshot(ctx context.Context) (StatisticsSnapshot, err
 		apiSnapshot.Models[model] = ModelSnapshot{
 			TotalRequests: reqCount,
 			TotalTokens:   tokens,
+			Details:       []RequestDetail{}, // Initialize empty, will be populated below
 		}
 		result.APIs[apiKey] = apiSnapshot
+	}
+
+	// Query request details for each API key and model
+	detailRows, err := p.db.QueryContext(ctx, `
+		SELECT
+			api_key,
+			model,
+			requested_at,
+			source,
+			auth_index,
+			failed,
+			input_tokens,
+			output_tokens,
+			reasoning_tokens,
+			cached_tokens,
+			total_tokens
+		FROM usage_records
+		ORDER BY requested_at DESC
+	`)
+	if err != nil {
+		return result, fmt.Errorf("failed to query request details: %w", err)
+	}
+	defer detailRows.Close()
+
+	for detailRows.Next() {
+		var apiKey, model, source, authIndex, requestedAtStr string
+		var failed int
+		var inputTokens, outputTokens, reasoningTokens, cachedTokens, totalTokens int64
+
+		if err := detailRows.Scan(
+			&apiKey, &model, &requestedAtStr, &source, &authIndex, &failed,
+			&inputTokens, &outputTokens, &reasoningTokens, &cachedTokens, &totalTokens,
+		); err != nil {
+			log.Errorf("SQLite plugin: failed to scan request detail row: %v", err)
+			continue
+		}
+
+		// Parse timestamp
+		requestedAt, err := time.Parse("2006-01-02 15:04:05", requestedAtStr)
+		if err != nil {
+			requestedAt, err = time.Parse(time.RFC3339, requestedAtStr)
+			if err != nil {
+				log.Errorf("SQLite plugin: failed to parse timestamp: %v", err)
+				continue
+			}
+		}
+
+		detail := RequestDetail{
+			Timestamp: requestedAt,
+			Source:    source,
+			AuthIndex: authIndex,
+			Failed:    failed != 0,
+			Tokens: TokenStats{
+				InputTokens:     inputTokens,
+				OutputTokens:    outputTokens,
+				ReasoningTokens: reasoningTokens,
+				CachedTokens:    cachedTokens,
+				TotalTokens:     totalTokens,
+			},
+		}
+
+		if apiSnapshot, exists := result.APIs[apiKey]; exists {
+			if modelSnapshot, modelExists := apiSnapshot.Models[model]; modelExists {
+				modelSnapshot.Details = append(modelSnapshot.Details, detail)
+				apiSnapshot.Models[model] = modelSnapshot
+				result.APIs[apiKey] = apiSnapshot
+			}
+		}
 	}
 
 	// Query requests by day

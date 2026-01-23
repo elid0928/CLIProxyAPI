@@ -549,8 +549,68 @@ func (p *MySQLPlugin) GetSnapshot(ctx context.Context) (StatisticsSnapshot, erro
 		apiSnapshot.Models[model] = ModelSnapshot{
 			TotalRequests: reqCount,
 			TotalTokens:   tokens,
+			Details:       []RequestDetail{}, // Initialize empty, will be populated below
 		}
 		result.APIs[apiKey] = apiSnapshot
+	}
+
+	// Query request details for each API key and model
+	detailRows, err := p.db.QueryContext(ctx, `
+		SELECT
+			api_key,
+			model,
+			requested_at,
+			source,
+			auth_index,
+			failed,
+			input_tokens,
+			output_tokens,
+			reasoning_tokens,
+			cached_tokens,
+			total_tokens
+		FROM usage_records
+		ORDER BY requested_at DESC
+	`)
+	if err != nil {
+		return result, fmt.Errorf("failed to query request details: %w", err)
+	}
+	defer detailRows.Close()
+
+	for detailRows.Next() {
+		var apiKey, model, source, authIndex string
+		var requestedAt time.Time
+		var failed bool
+		var inputTokens, outputTokens, reasoningTokens, cachedTokens, totalTokens int64
+
+		if err := detailRows.Scan(
+			&apiKey, &model, &requestedAt, &source, &authIndex, &failed,
+			&inputTokens, &outputTokens, &reasoningTokens, &cachedTokens, &totalTokens,
+		); err != nil {
+			log.Errorf("MySQL plugin: failed to scan request detail row: %v", err)
+			continue
+		}
+
+		detail := RequestDetail{
+			Timestamp: requestedAt,
+			Source:    source,
+			AuthIndex: authIndex,
+			Failed:    failed,
+			Tokens: TokenStats{
+				InputTokens:     inputTokens,
+				OutputTokens:    outputTokens,
+				ReasoningTokens: reasoningTokens,
+				CachedTokens:    cachedTokens,
+				TotalTokens:     totalTokens,
+			},
+		}
+
+		if apiSnapshot, exists := result.APIs[apiKey]; exists {
+			if modelSnapshot, modelExists := apiSnapshot.Models[model]; modelExists {
+				modelSnapshot.Details = append(modelSnapshot.Details, detail)
+				apiSnapshot.Models[model] = modelSnapshot
+				result.APIs[apiKey] = apiSnapshot
+			}
+		}
 	}
 
 	// Query requests by day
