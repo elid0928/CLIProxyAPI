@@ -522,16 +522,25 @@ func (p *SQLitePlugin) GetSnapshot(ctx context.Context) (StatisticsSnapshot, err
 		return result, fmt.Errorf("SQLite plugin not initialized")
 	}
 
-	// Query total statistics
+	// Determine time range for queries
+	// Use LoadHistoryDays config if set, otherwise default to 30 days for performance
+	historyDays := p.config.LoadHistoryDays
+	if historyDays <= 0 {
+		historyDays = 30 // Default to 30 days to prevent full table scans
+	}
+	startTime := time.Now().AddDate(0, 0, -historyDays).Format("2006-01-02 15:04:05")
+
+	// Query total statistics with time range
 	var totalRequests, successCount, failureCount, totalTokens int64
 	err := p.db.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*) as total_requests,
-			SUM(CASE WHEN failed = 0 THEN 1 ELSE 0 END) as success_count,
-			SUM(CASE WHEN failed = 1 THEN 1 ELSE 0 END) as failure_count,
+			COALESCE(SUM(CASE WHEN failed = 0 THEN 1 ELSE 0 END), 0) as success_count,
+			COALESCE(SUM(CASE WHEN failed = 1 THEN 1 ELSE 0 END), 0) as failure_count,
 			COALESCE(SUM(total_tokens), 0) as total_tokens
 		FROM usage_records
-	`).Scan(&totalRequests, &successCount, &failureCount, &totalTokens)
+		WHERE requested_at >= ?
+	`, startTime).Scan(&totalRequests, &successCount, &failureCount, &totalTokens)
 	if err != nil {
 		return result, fmt.Errorf("failed to query total stats: %w", err)
 	}
@@ -541,7 +550,7 @@ func (p *SQLitePlugin) GetSnapshot(ctx context.Context) (StatisticsSnapshot, err
 	result.FailureCount = failureCount
 	result.TotalTokens = totalTokens
 
-	// Query statistics by API key and model
+	// Query statistics by API key and model with time range
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT
 			api_key,
@@ -549,8 +558,9 @@ func (p *SQLitePlugin) GetSnapshot(ctx context.Context) (StatisticsSnapshot, err
 			COUNT(*) as total_requests,
 			COALESCE(SUM(total_tokens), 0) as total_tokens
 		FROM usage_records
+		WHERE requested_at >= ?
 		GROUP BY api_key, model
-	`)
+	`, startTime)
 	if err != nil {
 		return result, fmt.Errorf("failed to query API stats: %w", err)
 	}
@@ -580,7 +590,8 @@ func (p *SQLitePlugin) GetSnapshot(ctx context.Context) (StatisticsSnapshot, err
 		result.APIs[apiKey] = apiSnapshot
 	}
 
-	// Query request details for each API key and model
+	// Query request details for each API key and model with time range and limit
+	// Limit to most recent 1000 records per query to prevent memory issues
 	detailRows, err := p.db.QueryContext(ctx, `
 		SELECT
 			api_key,
@@ -595,8 +606,10 @@ func (p *SQLitePlugin) GetSnapshot(ctx context.Context) (StatisticsSnapshot, err
 			cached_tokens,
 			total_tokens
 		FROM usage_records
+		WHERE requested_at >= ?
 		ORDER BY requested_at DESC
-	`)
+		LIMIT 1000
+	`, startTime)
 	if err != nil {
 		return result, fmt.Errorf("failed to query request details: %w", err)
 	}
@@ -648,15 +661,17 @@ func (p *SQLitePlugin) GetSnapshot(ctx context.Context) (StatisticsSnapshot, err
 		}
 	}
 
-	// Query requests by day
+	// Query requests by day with time range
 	dayRows, err := p.db.QueryContext(ctx, `
 		SELECT
 			DATE(requested_at) as day,
 			COUNT(*) as requests,
 			COALESCE(SUM(total_tokens), 0) as tokens
 		FROM usage_records
+		WHERE requested_at >= ?
 		GROUP BY DATE(requested_at)
-	`)
+		ORDER BY day DESC
+	`, startTime)
 	if err != nil {
 		return result, fmt.Errorf("failed to query daily stats: %w", err)
 	}
@@ -673,15 +688,16 @@ func (p *SQLitePlugin) GetSnapshot(ctx context.Context) (StatisticsSnapshot, err
 		result.TokensByDay[day] = tokens
 	}
 
-	// Query requests by hour
+	// Query requests by hour with time range
 	hourRows, err := p.db.QueryContext(ctx, `
 		SELECT
 			CAST(strftime('%H', requested_at) AS INTEGER) as hour,
 			COUNT(*) as requests,
 			COALESCE(SUM(total_tokens), 0) as tokens
 		FROM usage_records
+		WHERE requested_at >= ?
 		GROUP BY strftime('%H', requested_at)
-	`)
+	`, startTime)
 	if err != nil {
 		return result, fmt.Errorf("failed to query hourly stats: %w", err)
 	}

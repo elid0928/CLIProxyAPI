@@ -38,8 +38,11 @@ CREATE TABLE IF NOT EXISTS `usage_records` (
   -- Index for source-based queries (account tracking)
   KEY `idx_source` (`source`, `requested_at`),
 
-  -- Composite index for common aggregation queries
-  KEY `idx_composite` (`api_key`, `model`, `requested_at`)
+  -- Composite index for common aggregation queries (api_key + model grouping with time filter)
+  KEY `idx_composite` (`requested_at`, `api_key`, `model`),
+
+  -- Index for GROUP BY api_key, model with time range filter
+  KEY `idx_api_model_time` (`api_key`, `model`, `requested_at`)
 
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 COMMENT='Usage statistics records with token consumption details';
