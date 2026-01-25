@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	log "github.com/sirupsen/logrus"
 )
 
 // RequestInfo holds essential details of an incoming HTTP request for logging purposes.
@@ -265,6 +266,13 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 
 	hasAPIError := len(slicesAPIResponseError) > 0 || finalStatusCode >= http.StatusBadRequest
 	forceLog := w.logOnErrorOnly && hasAPIError && !w.logger.IsEnabled()
+
+	// Debug logging for error log troubleshooting
+	if hasAPIError && !w.logger.IsEnabled() {
+		log.Debugf("[error-log-debug] statusCode=%d, logOnErrorOnly=%v, hasAPIError=%v, forceLog=%v, isStreaming=%v, bodyLen=%d, apiErrorCount=%d",
+			finalStatusCode, w.logOnErrorOnly, hasAPIError, forceLog, w.isStreaming, w.body.Len(), len(slicesAPIResponseError))
+	}
+
 	if !w.logger.IsEnabled() && !forceLog {
 		return nil
 	}

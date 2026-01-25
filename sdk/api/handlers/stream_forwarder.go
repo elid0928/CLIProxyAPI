@@ -37,6 +37,22 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 		return
 	}
 
+	// Helper to record streaming errors to gin.Context for error-only logging.
+	// This enables error logs to capture mid-stream failures even though HTTP 200 was already sent.
+	recordStreamError := func(errMsg *interfaces.ErrorMessage) {
+		if errMsg == nil || c == nil {
+			return
+		}
+		if apiResponseErrors, isExist := c.Get("API_RESPONSE_ERROR"); isExist {
+			if slicesAPIResponseError, isOk := apiResponseErrors.([]*interfaces.ErrorMessage); isOk {
+				slicesAPIResponseError = append(slicesAPIResponseError, errMsg)
+				c.Set("API_RESPONSE_ERROR", slicesAPIResponseError)
+			}
+		} else {
+			c.Set("API_RESPONSE_ERROR", []*interfaces.ErrorMessage{errMsg})
+		}
+	}
+
 	writeChunk := opts.WriteChunk
 	if writeChunk == nil {
 		writeChunk = func([]byte) {}
@@ -80,6 +96,7 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 					}
 				}
 				if terminalErr != nil {
+					recordStreamError(terminalErr)
 					if opts.WriteTerminalError != nil {
 						opts.WriteTerminalError(terminalErr)
 					}
@@ -102,6 +119,7 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 			}
 			if errMsg != nil {
 				terminalErr = errMsg
+				recordStreamError(errMsg)
 				if opts.WriteTerminalError != nil {
 					opts.WriteTerminalError(errMsg)
 					flusher.Flush()

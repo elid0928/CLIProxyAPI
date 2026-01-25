@@ -349,6 +349,12 @@ func (s *Server) setupRoutes() {
 	})
 	s.engine.POST("/v1internal:method", geminiCLIHandlers.CLIHandler)
 
+	// Telemetry endpoint for Claude Code CLI (silently accepts and discards events)
+	s.engine.POST("/api/event_logging/batch", func(c *gin.Context) {
+		logging.SkipGinRequestLogging(c)
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
 	// OAuth callback endpoints (reuse main server port)
 	// These endpoints receive provider redirects and persist
 	// the short-lived code/state for the waiting goroutine.
