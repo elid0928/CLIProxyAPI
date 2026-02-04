@@ -103,6 +103,9 @@ func (e *GeminiCLIExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.
 
 // Execute performs a non-streaming request to the Gemini CLI API.
 func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if opts.Alt == "responses/compact" {
+		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	tokenSource, baseTokenData, err := prepareGeminiCLITokenSource(ctx, e.cfg, auth)
@@ -227,7 +230,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 
 		lastStatus = httpResp.StatusCode
 		lastBody = append([]byte(nil), data...)
-		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		if httpResp.StatusCode == 429 {
 			if idx+1 < len(models) {
 				log.Debugf("gemini cli executor: rate limited, retrying with next model: %s", models[idx+1])
@@ -253,6 +256,9 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 
 // ExecuteStream performs a streaming request to the Gemini CLI API.
 func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
+	if opts.Alt == "responses/compact" {
+		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
+	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	tokenSource, baseTokenData, err := prepareGeminiCLITokenSource(ctx, e.cfg, auth)
@@ -360,7 +366,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			appendAPIResponseChunk(ctx, e.cfg, data)
 			lastStatus = httpResp.StatusCode
 			lastBody = append([]byte(nil), data...)
-			log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+			logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 			if httpResp.StatusCode == 429 {
 				if idx+1 < len(models) {
 					log.Debugf("gemini cli executor: rate limited, retrying with next model: %s", models[idx+1])
