@@ -69,6 +69,9 @@ type Config struct {
 
 	// RequestRetry defines the retry times when the request failed.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
+	// MaxRetryCredentials defines the maximum number of credentials to try for a failed request.
+	// Set to 0 or a negative value to keep trying all available credentials (legacy behavior).
+	MaxRetryCredentials int `yaml:"max-retry-credentials" json:"max-retry-credentials"`
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
 	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
 
@@ -89,6 +92,10 @@ type Config struct {
 
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
+
+	// ClaudeHeaderDefaults configures default header values for Claude API requests.
+	// These are used as fallbacks when the client does not send its own headers.
+	ClaudeHeaderDefaults ClaudeHeaderDefaults `yaml:"claude-header-defaults" json:"claude-header-defaults"`
 
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
@@ -121,6 +128,15 @@ type Config struct {
 	UsageSQLite UsageSQLiteConfig `yaml:"usage-sqlite" json:"usage-sqlite"`
 
 	legacyMigrationPending bool `yaml:"-" json:"-"`
+}
+
+// ClaudeHeaderDefaults configures default header values injected into Claude API requests
+// when the client does not send them. Update these when Claude Code releases a new version.
+type ClaudeHeaderDefaults struct {
+	UserAgent      string `yaml:"user-agent" json:"user-agent"`
+	PackageVersion string `yaml:"package-version" json:"package-version"`
+	RuntimeVersion string `yaml:"runtime-version" json:"runtime-version"`
+	Timeout        string `yaml:"timeout" json:"timeout"`
 }
 
 // TLSConfig holds HTTPS server settings.
@@ -326,6 +342,10 @@ type CloakConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters.
 	// This can help bypass certain content filters.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+
+	// CacheUserID controls whether Claude user_id values are cached per API key.
+	// When false, a fresh random user_id is generated for every request.
+	CacheUserID *bool `yaml:"cache-user-id,omitempty" json:"cache-user-id,omitempty"`
 }
 
 // ClaudeKey represents the configuration for a Claude API key,
@@ -392,6 +412,9 @@ type CodexKey struct {
 	// BaseURL is the base URL for the Codex API endpoint.
 	// If empty, the default Codex API URL will be used.
 	BaseURL string `yaml:"base-url" json:"base-url"`
+
+	// Websockets enables the Responses API websocket transport for this credential.
+	Websockets bool `yaml:"websockets,omitempty" json:"websockets,omitempty"`
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
@@ -531,16 +554,6 @@ func LoadConfig(configFile string) (*Config, error) {
 // If optional is true and the file is missing, it returns an empty Config.
 // If optional is true and the file is empty or invalid, it returns an empty Config.
 func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
-	// NOTE: Startup oauth-model-alias migration is intentionally disabled.
-	// Reason: avoid mutating config.yaml during server startup.
-	// Re-enable the block below if automatic startup migration is needed again.
-	// if migrated, err := MigrateOAuthModelAlias(configFile); err != nil {
-	// 	// Log warning but don't fail - config loading should still work
-	// 	fmt.Printf("Warning: oauth-model-alias migration failed: %v\n", err)
-	// } else if migrated {
-	// 	fmt.Println("Migrated oauth-model-mappings to oauth-model-alias")
-	// }
-
 	// Read the entire configuration file into memory.
 	data, err := os.ReadFile(configFile)
 	if err != nil {
@@ -625,6 +638,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	if cfg.ErrorLogsMaxFiles < 0 {
 		cfg.ErrorLogsMaxFiles = 10
+	}
+
+	if cfg.MaxRetryCredentials < 0 {
+		cfg.MaxRetryCredentials = 0
 	}
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.
@@ -1571,9 +1588,6 @@ func pruneMappingToGeneratedKeys(dstRoot, srcRoot *yaml.Node, key string) {
 	srcIdx := findMapKeyIndex(srcRoot, key)
 	if srcIdx < 0 {
 		// Keep an explicit empty mapping for oauth-model-alias when it was previously present.
-		//
-		// Rationale: LoadConfig runs MigrateOAuthModelAlias before unmarshalling. If the
-		// oauth-model-alias key is missing, migration will add the default antigravity aliases.
 		// When users delete the last channel from oauth-model-alias via the management API,
 		// we want that deletion to persist across hot reloads and restarts.
 		if key == "oauth-model-alias" {

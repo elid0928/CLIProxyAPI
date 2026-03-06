@@ -290,6 +290,9 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 		auth.CreatedAt = existing.CreatedAt
 		auth.LastRefreshedAt = existing.LastRefreshedAt
 		auth.NextRefreshAfter = existing.NextRefreshAfter
+		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
+			auth.ModelStates = existing.ModelStates
+		}
 		op = "update"
 		_, err = s.coreManager.Update(ctx, auth)
 	} else {
@@ -325,6 +328,9 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 		if _, err := s.coreManager.Update(ctx, existing); err != nil {
 			log.Errorf("failed to disable auth %s: %v", id, err)
 		}
+		if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") {
+			s.ensureExecutorsForAuth(existing)
+		}
 	}
 }
 
@@ -333,7 +339,7 @@ func (s *Service) applyRetryConfig(cfg *config.Config) {
 		return
 	}
 	maxInterval := time.Duration(cfg.MaxRetryInterval) * time.Second
-	s.coreManager.SetRetryConfig(cfg.RequestRetry, maxInterval)
+	s.coreManager.SetRetryConfig(cfg.RequestRetry, maxInterval, cfg.MaxRetryCredentials)
 }
 
 func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName string, ok bool) {
@@ -357,7 +363,24 @@ func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName 
 }
 
 func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
-	if s == nil || a == nil {
+	s.ensureExecutorsForAuthWithMode(a, false)
+}
+
+func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace bool) {
+	if s == nil || s.coreManager == nil || a == nil {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(a.Provider), "codex") {
+		if !forceReplace {
+			existingExecutor, hasExecutor := s.coreManager.Executor("codex")
+			if hasExecutor {
+				_, isCodexAutoExecutor := existingExecutor.(*executor.CodexAutoExecutor)
+				if isCodexAutoExecutor {
+					return
+				}
+			}
+		}
+		s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutor(s.cfg))
 		return
 	}
 	// Skip disabled auth entries when (re)binding executors.
@@ -392,8 +415,6 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
 	case "claude":
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
-	case "codex":
-		s.coreManager.RegisterExecutor(executor.NewCodexExecutor(s.cfg))
 	case "qwen":
 		s.coreManager.RegisterExecutor(executor.NewQwenExecutor(s.cfg))
 	case "iflow":
@@ -415,8 +436,15 @@ func (s *Service) rebindExecutors() {
 		return
 	}
 	auths := s.coreManager.List()
+	reboundCodex := false
 	for _, auth := range auths {
-		s.ensureExecutorsForAuth(auth)
+		if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+			if reboundCodex {
+				continue
+			}
+			reboundCodex = true
+		}
+		s.ensureExecutorsForAuthWithMode(auth, true)
 	}
 }
 
@@ -763,9 +791,12 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "vertex":
 		// Vertex AI Gemini supports the same model identifiers as Gemini.
 		models = registry.GetGeminiVertexModels()
-		if authKind == "apikey" {
-			if entry := s.resolveConfigVertexCompatKey(a); entry != nil && len(entry.Models) > 0 {
+		if entry := s.resolveConfigVertexCompatKey(a); entry != nil {
+			if len(entry.Models) > 0 {
 				models = buildVertexCompatConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
 			}
 		}
 		models = applyExcludedModels(models, excluded)
@@ -900,6 +931,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			key = strings.ToLower(strings.TrimSpace(a.Provider))
 		}
 		GlobalModelRegistry().RegisterClient(a.ID, key, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
+		if provider == "antigravity" {
+			s.backfillAntigravityModels(a, models)
+		}
 		return
 	}
 
@@ -1042,6 +1076,56 @@ func (s *Service) oauthExcludedModels(provider, authKind string) []string {
 		return nil
 	}
 	return cfg.OAuthExcludedModels[providerKey]
+}
+
+func (s *Service) backfillAntigravityModels(source *coreauth.Auth, primaryModels []*ModelInfo) {
+	if s == nil || s.coreManager == nil || len(primaryModels) == 0 {
+		return
+	}
+
+	sourceID := ""
+	if source != nil {
+		sourceID = strings.TrimSpace(source.ID)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	for _, candidate := range s.coreManager.List() {
+		if candidate == nil || candidate.Disabled {
+			continue
+		}
+		candidateID := strings.TrimSpace(candidate.ID)
+		if candidateID == "" || candidateID == sourceID {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(candidate.Provider), "antigravity") {
+			continue
+		}
+		if len(reg.GetModelsForClient(candidateID)) > 0 {
+			continue
+		}
+
+		authKind := strings.ToLower(strings.TrimSpace(candidate.Attributes["auth_kind"]))
+		if authKind == "" {
+			if kind, _ := candidate.AccountInfo(); strings.EqualFold(kind, "api_key") {
+				authKind = "apikey"
+			}
+		}
+		excluded := s.oauthExcludedModels("antigravity", authKind)
+		if candidate.Attributes != nil {
+			if val, ok := candidate.Attributes["excluded_models"]; ok && strings.TrimSpace(val) != "" {
+				excluded = strings.Split(val, ",")
+			}
+		}
+
+		models := applyExcludedModels(primaryModels, excluded)
+		models = applyOAuthModelAlias(s.cfg, "antigravity", authKind, models)
+		if len(models) == 0 {
+			continue
+		}
+
+		reg.RegisterClient(candidateID, "antigravity", applyModelPrefixes(models, candidate.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
+		log.Debugf("antigravity models backfilled for auth %s using primary model list", candidateID)
+	}
 }
 
 func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
