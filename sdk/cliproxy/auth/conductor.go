@@ -849,6 +849,40 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	return auth.Clone(), nil
 }
 
+// Delete removes an auth entry from runtime state and, unless persistence is skipped,
+// deletes the backing record from the configured store.
+func (m *Manager) Delete(ctx context.Context, id string) (*Auth, error) {
+	if m == nil {
+		return nil, nil
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, nil
+	}
+
+	var removed *Auth
+	m.mu.Lock()
+	if existing, ok := m.auths[id]; ok && existing != nil {
+		removed = existing.Clone()
+		delete(m.auths, id)
+		delete(m.modelPoolOffsets, id)
+	}
+	m.mu.Unlock()
+	if removed == nil {
+		return nil, nil
+	}
+
+	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	if m.scheduler != nil {
+		m.scheduler.removeAuth(id)
+	}
+
+	if err := m.deletePersisted(ctx, removed); err != nil {
+		return removed.Clone(), err
+	}
+	return removed.Clone(), nil
+}
+
 // Load resets manager state from the backing store.
 func (m *Manager) Load(ctx context.Context) error {
 	m.mu.Lock()
@@ -2313,6 +2347,24 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	}
 	_, err := m.store.Save(ctx, auth)
 	return err
+}
+
+func (m *Manager) deletePersisted(ctx context.Context, auth *Auth) error {
+	if m.store == nil || auth == nil {
+		return nil
+	}
+	if shouldSkipPersist(ctx) {
+		return nil
+	}
+	if auth.Attributes != nil {
+		if v := strings.ToLower(strings.TrimSpace(auth.Attributes["runtime_only"])); v == "true" {
+			return nil
+		}
+	}
+	if auth.Metadata == nil && auth.Storage == nil {
+		return nil
+	}
+	return m.store.Delete(ctx, auth.ID)
 }
 
 // StartAutoRefresh launches a background loop that evaluates auth freshness

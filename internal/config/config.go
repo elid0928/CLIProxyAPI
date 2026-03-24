@@ -75,6 +75,14 @@ type Config struct {
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
 	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
 
+	// CodexCredentialCheckIntervalSeconds controls how often file-backed Codex OAuth credentials
+	// are checked for low remaining quota or unauthorized status. Set to 0 to disable.
+	CodexCredentialCheckIntervalSeconds int `yaml:"codex-credential-check-interval-seconds" json:"codex-credential-check-interval-seconds"`
+
+	// CodexCredentialDeleteThresholdPercent is the minimum remaining quota percentage (for free-plan
+	// accounts) below which a Codex OAuth credential is automatically deleted. Default is 10.0.
+	CodexCredentialDeleteThresholdPercent float64 `yaml:"codex-credential-delete-threshold-percent" json:"codex-credential-delete-threshold-percent"`
+
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
@@ -654,6 +662,17 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
+	}
+
+	if cfg.CodexCredentialCheckIntervalSeconds < 0 {
+		cfg.CodexCredentialCheckIntervalSeconds = 0
+	}
+
+	if cfg.CodexCredentialDeleteThresholdPercent < 0 {
+		cfg.CodexCredentialDeleteThresholdPercent = 0
+	}
+	if cfg.CodexCredentialDeleteThresholdPercent == 0 {
+		cfg.CodexCredentialDeleteThresholdPercent = 10.0
 	}
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.

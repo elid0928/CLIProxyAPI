@@ -115,6 +115,15 @@ max-retry-credentials: 0
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
 
+# When > 0, periodically validate file-backed Codex OAuth credentials and delete
+# credentials that return 401 or have less than codex-credential-delete-threshold-percent remaining quota.
+codex-credential-check-interval-seconds: 0
+
+# Minimum remaining quota percentage for free-plan Codex accounts below which
+# the credential is automatically deleted. Default is 10 (10%). Only applies when
+# codex-credential-check-interval-seconds > 0.
+codex-credential-delete-threshold-percent: 10
+
 # Quota exceeded behavior
 quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded

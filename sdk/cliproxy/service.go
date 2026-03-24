@@ -84,6 +84,15 @@ type Service struct {
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
 
+	// codexCredentialInspector validates Codex OAuth credentials on a timer.
+	codexCredentialInspector codexCredentialInspector
+
+	// codexCredentialCheckCancel stops the background Codex credential checker.
+	codexCredentialCheckCancel context.CancelFunc
+
+	// codexCredentialCheckReload wakes the checker when config changes.
+	codexCredentialCheckReload chan struct{}
+
 	// shutdownOnce ensures shutdown is called only once.
 	shutdownOnce sync.Once
 
@@ -326,15 +335,8 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 		return
 	}
 	GlobalModelRegistry().UnregisterClient(id)
-	if existing, ok := s.coreManager.GetByID(id); ok && existing != nil {
-		existing.Disabled = true
-		existing.Status = coreauth.StatusDisabled
-		if _, err := s.coreManager.Update(ctx, existing); err != nil {
-			log.Errorf("failed to disable auth %s: %v", id, err)
-		}
-		if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") {
-			s.ensureExecutorsForAuth(existing)
-		}
+	if _, err := s.coreManager.Delete(ctx, id); err != nil {
+		log.Errorf("failed to delete auth %s: %v", id, err)
 	}
 }
 
@@ -661,6 +663,7 @@ func (s *Service) Run(ctx context.Context) error {
 			s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
 		}
 		s.rebindExecutors()
+		s.notifyCodexCredentialCheckerReload()
 	}
 
 	watcherWrapper, err = s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
@@ -687,6 +690,7 @@ func (s *Service) Run(ctx context.Context) error {
 		s.coreManager.StartAutoRefresh(context.Background(), interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
 	}
+	s.startCodexCredentialChecker(context.Background())
 
 	select {
 	case <-ctx.Done():
@@ -723,6 +727,10 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()
+		}
+		if s.codexCredentialCheckCancel != nil {
+			s.codexCredentialCheckCancel()
+			s.codexCredentialCheckCancel = nil
 		}
 		if s.watcher != nil {
 			if err := s.watcher.Stop(); err != nil {
