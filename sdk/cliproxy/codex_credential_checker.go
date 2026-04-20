@@ -155,7 +155,7 @@ func (s *Service) removeCodexCredential(ctx context.Context, auth *coreauth.Auth
 		return
 	}
 	log.Warnf("deleting codex credential %s: %s", codexCredentialLogLabel(auth), strings.TrimSpace(reason))
-	s.applyCoreAuthRemoval(ctx, auth.ID)
+	s.deleteCoreAuth(ctx, auth.ID)
 }
 
 func (s *Service) codexCredentialInspectorOrDefault() codexCredentialInspector {
