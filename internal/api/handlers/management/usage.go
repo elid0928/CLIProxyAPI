@@ -3,10 +3,14 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
 
@@ -21,31 +25,28 @@ type usageImportPayload struct {
 	Usage   usage.StatisticsSnapshot `json:"usage"`
 }
 
-// getSnapshot retrieves the statistics snapshot from backend storage if available,
-// otherwise uses in-memory statistics only when no backend storage is configured.
+type usageQueueRecord []byte
+
+func (r usageQueueRecord) MarshalJSON() ([]byte, error) {
+	if json.Valid(r) {
+		return append([]byte(nil), r...), nil
+	}
+	return json.Marshal(string(r))
+}
+
 func (h *Handler) getSnapshot(ctx context.Context) usage.StatisticsSnapshot {
-	// When backend storage is configured, always use it
 	if usage.HasBackendStorage() {
 		snapshot, err := usage.GetBackendSnapshot(ctx)
-		if err != nil {
-			// Return empty snapshot on error, do not fall back to memory
+		if err != nil || snapshot == nil {
 			return usage.StatisticsSnapshot{}
 		}
-		if snapshot != nil {
-			return *snapshot
-		}
-		return usage.StatisticsSnapshot{}
+		return *snapshot
 	}
 
-	// Only use in-memory statistics when no backend storage is configured
-	if h != nil && h.usageStats != nil {
-		return h.usageStats.Snapshot()
-	}
-	return usage.StatisticsSnapshot{}
+	return usage.GetRequestStatistics().Snapshot()
 }
 
 // GetUsageStatistics returns the request statistics snapshot.
-// When a backend storage plugin is available, data is fetched from the database.
 func (h *Handler) GetUsageStatistics(c *gin.Context) {
 	snapshot := h.getSnapshot(c.Request.Context())
 	c.JSON(http.StatusOK, gin.H{
@@ -55,7 +56,6 @@ func (h *Handler) GetUsageStatistics(c *gin.Context) {
 }
 
 // ExportUsageStatistics returns a complete usage snapshot for backup/migration.
-// When a backend storage plugin is available, data is fetched from the database.
 func (h *Handler) ExportUsageStatistics(c *gin.Context) {
 	snapshot := h.getSnapshot(c.Request.Context())
 	c.JSON(http.StatusOK, usageExportPayload{
@@ -67,7 +67,8 @@ func (h *Handler) ExportUsageStatistics(c *gin.Context) {
 
 // ImportUsageStatistics merges a previously exported usage snapshot into memory.
 func (h *Handler) ImportUsageStatistics(c *gin.Context) {
-	if h == nil || h.usageStats == nil {
+	stats := usage.GetRequestStatistics()
+	if stats == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "usage statistics unavailable"})
 		return
 	}
@@ -88,12 +89,46 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 		return
 	}
 
-	result := h.usageStats.MergeSnapshot(payload.Usage)
-	snapshot := h.usageStats.Snapshot()
+	result := stats.MergeSnapshot(payload.Usage)
+	snapshot := stats.Snapshot()
 	c.JSON(http.StatusOK, gin.H{
 		"added":           result.Added,
 		"skipped":         result.Skipped,
 		"total_requests":  snapshot.TotalRequests,
 		"failed_requests": snapshot.FailureCount,
 	})
+}
+
+// GetUsageQueue pops queued usage records from the usage queue.
+func (h *Handler) GetUsageQueue(c *gin.Context) {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
+		return
+	}
+
+	count, errCount := parseUsageQueueCount(c.Query("count"))
+	if errCount != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errCount.Error()})
+		return
+	}
+
+	items := redisqueue.PopOldest(count)
+	records := make([]usageQueueRecord, 0, len(items))
+	for _, item := range items {
+		records = append(records, usageQueueRecord(append([]byte(nil), item...)))
+	}
+
+	c.JSON(http.StatusOK, records)
+}
+
+func parseUsageQueueCount(value string) (int, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 1, nil
+	}
+	count, errCount := strconv.Atoi(value)
+	if errCount != nil || count <= 0 {
+		return 0, errors.New("count must be a positive integer")
+	}
+	return count, nil
 }
