@@ -324,7 +324,7 @@ GET /v0/management/usage?start=2025-01-01&end=2025-01-31
 **用例**: 桌面 AI 工具内置代理
 
 ```go
-import "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
+import "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 
 // 在 Electron/Tauri 应用中嵌入代理
 svc, _ := cliproxy.NewBuilder().

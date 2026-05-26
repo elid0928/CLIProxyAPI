@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -281,6 +281,8 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 
 	hasAPIError := len(slicesAPIResponseError) > 0 || finalStatusCode >= http.StatusBadRequest
 	forceLog := w.logOnErrorOnly && hasAPIError && !w.logger.IsEnabled()
+	websocketTimelineSource := w.extractWebsocketTimelineSource(c)
+	apiWebsocketTimelineSource := w.extractAPIWebsocketTimelineSource(c)
 
 	// Debug logging for error log troubleshooting
 	if hasAPIError && !w.logger.IsEnabled() {
@@ -289,6 +291,7 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	}
 
 	if !w.logger.IsEnabled() && !forceLog {
+		cleanupFileBodySources(websocketTimelineSource, apiWebsocketTimelineSource)
 		return nil
 	}
 
@@ -315,6 +318,13 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 			_ = w.streamWriter.WriteAPIResponse(apiResponse)
 		}
 		apiWebsocketTimeline := w.extractAPIWebsocketTimeline(c)
+		var errMerge error
+		apiWebsocketTimeline, errMerge = mergeFileBodySource(apiWebsocketTimeline, apiWebsocketTimelineSource)
+		if errMerge != nil {
+			cleanupFileBodySources(websocketTimelineSource)
+			return errMerge
+		}
+		cleanupFileBodySources(websocketTimelineSource)
 		if len(apiWebsocketTimeline) > 0 {
 			_ = w.streamWriter.WriteAPIWebsocketTimeline(apiWebsocketTimeline)
 		}
@@ -326,7 +336,7 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		return nil
 	}
 
-	return w.logRequest(w.extractRequestBody(c), finalStatusCode, w.cloneHeaders(), w.extractResponseBody(c), w.extractWebsocketTimeline(c), w.extractAPIRequest(c), w.extractAPIResponse(c), w.extractAPIWebsocketTimeline(c), w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog)
+	return w.logRequest(w.extractRequestBody(c), finalStatusCode, w.cloneHeaders(), w.extractResponseBody(c), w.extractWebsocketTimeline(c), websocketTimelineSource, w.extractAPIRequest(c), w.extractAPIResponse(c), w.extractAPIWebsocketTimeline(c), apiWebsocketTimelineSource, w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog)
 }
 
 func (w *ResponseWriterWrapper) cloneHeaders() map[string][]string {
@@ -378,6 +388,10 @@ func (w *ResponseWriterWrapper) extractAPIWebsocketTimeline(c *gin.Context) []by
 	return bytes.Clone(data)
 }
 
+func (w *ResponseWriterWrapper) extractAPIWebsocketTimelineSource(c *gin.Context) *logging.FileBodySource {
+	return extractFileBodySource(c, logging.APIWebsocketTimelineSourceContextKey)
+}
+
 func (w *ResponseWriterWrapper) extractAPIResponseTimestamp(c *gin.Context) time.Time {
 	ts, isExist := c.Get("API_RESPONSE_TIMESTAMP")
 	if !isExist {
@@ -413,6 +427,25 @@ func (w *ResponseWriterWrapper) extractWebsocketTimeline(c *gin.Context) []byte 
 	return extractBodyOverride(c, websocketTimelineOverrideContextKey)
 }
 
+func (w *ResponseWriterWrapper) extractWebsocketTimelineSource(c *gin.Context) *logging.FileBodySource {
+	return extractFileBodySource(c, logging.WebsocketTimelineSourceContextKey)
+}
+
+func extractFileBodySource(c *gin.Context, key string) *logging.FileBodySource {
+	if c == nil {
+		return nil
+	}
+	value, exists := c.Get(key)
+	if !exists {
+		return nil
+	}
+	source, ok := value.(*logging.FileBodySource)
+	if !ok || source == nil {
+		return nil
+	}
+	return source
+}
+
 func extractBodyOverride(c *gin.Context, key string) []byte {
 	if c == nil {
 		return nil
@@ -434,9 +467,46 @@ func extractBodyOverride(c *gin.Context, key string) []byte {
 	return nil
 }
 
-func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, headers map[string][]string, body, websocketTimeline, apiRequestBody, apiResponseBody, apiWebsocketTimeline []byte, apiResponseTimestamp time.Time, apiResponseErrors []*interfaces.ErrorMessage, forceLog bool) error {
+func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, headers map[string][]string, body, websocketTimeline []byte, websocketTimelineSource *logging.FileBodySource, apiRequestBody, apiResponseBody, apiWebsocketTimeline []byte, apiWebsocketTimelineSource *logging.FileBodySource, apiResponseTimestamp time.Time, apiResponseErrors []*interfaces.ErrorMessage, forceLog bool) error {
 	if w.requestInfo == nil {
+		cleanupFileBodySources(websocketTimelineSource, apiWebsocketTimelineSource)
 		return nil
+	}
+
+	if loggerWithSources, ok := w.logger.(interface {
+		LogRequestWithOptionsAndSources(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, *logging.FileBodySource, []byte, []byte, []byte, *logging.FileBodySource, []*interfaces.ErrorMessage, bool, string, time.Time, time.Time) error
+	}); ok {
+		return loggerWithSources.LogRequestWithOptionsAndSources(
+			w.requestInfo.URL,
+			w.requestInfo.Method,
+			w.requestInfo.Headers,
+			requestBody,
+			statusCode,
+			headers,
+			body,
+			websocketTimeline,
+			websocketTimelineSource,
+			apiRequestBody,
+			apiResponseBody,
+			apiWebsocketTimeline,
+			apiWebsocketTimelineSource,
+			apiResponseErrors,
+			forceLog,
+			w.requestInfo.RequestID,
+			w.requestInfo.Timestamp,
+			apiResponseTimestamp,
+		)
+	}
+
+	var errMerge error
+	websocketTimeline, errMerge = mergeFileBodySource(websocketTimeline, websocketTimelineSource)
+	if errMerge != nil {
+		cleanupFileBodySources(apiWebsocketTimelineSource)
+		return errMerge
+	}
+	apiWebsocketTimeline, errMerge = mergeFileBodySource(apiWebsocketTimeline, apiWebsocketTimelineSource)
+	if errMerge != nil {
+		return errMerge
 	}
 
 	if loggerWithOptions, ok := w.logger.(interface {
@@ -479,4 +549,35 @@ func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, h
 		w.requestInfo.Timestamp,
 		apiResponseTimestamp,
 	)
+}
+
+func mergeFileBodySource(payload []byte, source *logging.FileBodySource) ([]byte, error) {
+	if source == nil {
+		return payload, nil
+	}
+	defer cleanupFileBodySources(source)
+	if !source.HasPayload() {
+		return payload, nil
+	}
+	var buf bytes.Buffer
+	if len(payload) > 0 {
+		buf.Write(payload)
+		if !bytes.HasSuffix(payload, []byte("\n")) {
+			buf.WriteByte('\n')
+		}
+		buf.WriteByte('\n')
+	}
+	if errWrite := source.WriteTo(&buf); errWrite != nil {
+		return nil, errWrite
+	}
+	return buf.Bytes(), nil
+}
+
+func cleanupFileBodySources(sources ...*logging.FileBodySource) {
+	for _, source := range sources {
+		if source == nil {
+			continue
+		}
+		_ = source.Cleanup()
+	}
 }

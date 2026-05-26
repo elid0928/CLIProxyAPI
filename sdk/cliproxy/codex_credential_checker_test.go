@@ -10,8 +10,8 @@ import (
 	"sync"
 	"testing"
 
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
 type serviceDeleteStore struct {
@@ -361,9 +361,9 @@ func TestParseWhamUsageStatus(t *testing.T) {
 			wantHasQuota: false,
 		},
 		{
-			name:         "unknown plan: treated as free, quota checked",
-			body:         whamResponse("", 0, 93, false),
-			wantHasQuota: true,
+			name:              "unknown plan: treated as free, quota checked",
+			body:              whamResponse("", 0, 93, false),
+			wantHasQuota:      true,
 			wantRemainingPerc: 7,
 		},
 		{

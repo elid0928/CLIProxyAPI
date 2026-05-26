@@ -472,7 +472,7 @@ sdkAuth.RegisterTokenStore("custom", func(cfg) TokenStore {
 ### 3. SDK 嵌入式使用
 
 ```go
-import "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
+import "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 
 // 在自己的应用中嵌入代理服务
 svc, _ := cliproxy.NewBuilder().
