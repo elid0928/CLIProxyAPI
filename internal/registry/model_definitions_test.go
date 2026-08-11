@@ -16,19 +16,48 @@ func TestModelOverrideHeadersFromEmbeddedModels(t *testing.T) {
 	}
 }
 
-func TestWithXAIBuiltinsIncludesVideoPreviewModel(t *testing.T) {
+func TestGeminiVertexModelsUseFlashLiteReleaseID(t *testing.T) {
+	const releaseID = "gemini-3.1-flash-lite"
+	const previewID = releaseID + "-preview"
+
+	for _, model := range GetGeminiVertexModels() {
+		if model == nil {
+			continue
+		}
+		if model.ID == previewID {
+			t.Fatalf("Vertex model ID = %q, want release ID %q", model.ID, releaseID)
+		}
+		if model.ID == releaseID {
+			return
+		}
+	}
+
+	t.Fatalf("Vertex models do not contain %q", releaseID)
+}
+
+func TestWithXAIBuiltinsIncludesVideo15GAAndPreviewAlias(t *testing.T) {
 	models := WithXAIBuiltins(nil)
+	foundGA := false
+	foundPreviewAlias := false
 
 	for _, model := range models {
 		if model == nil {
 			continue
 		}
-		if model.ID == xaiBuiltinVideo15PreviewModelID {
-			return
+		if model.ID == xaiBuiltinVideo15ModelID {
+			foundGA = true
+		}
+		if model.ID == xaiBuiltinVideo15PreviewID {
+			foundPreviewAlias = true
 		}
 	}
 
-	t.Fatalf("expected xAI builtin model %s", xaiBuiltinVideo15PreviewModelID)
+	if !foundGA {
+		t.Fatalf("expected xAI builtin model %s", xaiBuiltinVideo15ModelID)
+	}
+	if !foundPreviewAlias {
+		t.Fatalf("expected xAI builtin compatibility alias %s", xaiBuiltinVideo15PreviewID)
+	}
 }
 
 func TestAntigravityWebSearchModelForRequiresRequestedModelCapability(t *testing.T) {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -1313,7 +1314,7 @@ func (h *OpenAIAPIHandler) streamOpenAICompatImages(c *gin.Context, compatReq []
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	model := strings.TrimSpace(imageModel)
 	execution, streamStarted, canceled := h.waitImagesStreamExecution(c, flusher, func() imagesStreamExecutionResult {
-		dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, xaiImagesHandlerType, model, compatReq, "")
+		dataChan, upstreamHeaders, errChan := h.ExecuteImageStreamWithAuthManager(cliCtx, xaiImagesHandlerType, model, compatReq, "")
 		return imagesStreamExecutionResult{Data: dataChan, UpstreamHeaders: upstreamHeaders, Errs: errChan}
 	})
 	if canceled {
@@ -1401,7 +1402,7 @@ func (h *OpenAIAPIHandler) collectImagesWithModel(c *gin.Context, imageReq []byt
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
 	model = strings.TrimSpace(model)
-	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, xaiImagesHandlerType, model, imageReq, "")
+	resp, upstreamHeaders, errMsg := h.ExecuteImageWithAuthManager(cliCtx, xaiImagesHandlerType, model, imageReq, "")
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
@@ -1452,7 +1453,7 @@ func (h *OpenAIAPIHandler) streamImagesWithModel(c *gin.Context, imageReq []byte
 	}
 	resultChan := make(chan imageStreamResult, 1)
 	go func() {
-		resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, xaiImagesHandlerType, model, imageReq, "")
+		resp, upstreamHeaders, errMsg := h.ExecuteImageWithAuthManager(cliCtx, xaiImagesHandlerType, model, imageReq, "")
 		resultChan <- imageStreamResult{resp: resp, upstreamHeaders: upstreamHeaders, errMsg: errMsg}
 	}()
 
@@ -1609,7 +1610,11 @@ func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, e
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, &interfaces.ErrorMessage{StatusCode: http.StatusRequestTimeout, Error: ctx.Err()}
+			errCtx := ctx.Err()
+			return nil, &interfaces.ErrorMessage{
+				StatusCode: clienterror.HTTPStatusFromErrorOr(errCtx, http.StatusRequestTimeout),
+				Error:      errCtx,
+			}
 		case errMsg, ok := <-errs:
 			if ok && errMsg != nil {
 				return nil, errMsg

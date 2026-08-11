@@ -1,6 +1,8 @@
 package synthesizer
 
 import (
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -258,6 +260,9 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 	if auths[0].Attributes["api_key"] != "sk-ant-api-xxx" {
 		t.Errorf("expected api_key sk-ant-api-xxx, got %s", auths[0].Attributes["api_key"])
 	}
+	if auths[0].Attributes["config_index"] != "0" {
+		t.Errorf("expected config_index 0, got %s", auths[0].Attributes["config_index"])
+	}
 	if _, ok := auths[0].Attributes["models_hash"]; !ok {
 		t.Error("expected models_hash in attributes")
 	}
@@ -306,6 +311,7 @@ func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 					BaseURL:        "https://api.openai.com",
 					ProxyURL:       "http://proxy.local",
 					Websockets:     true,
+					AlphaSearch:    true,
 					DisableCooling: true,
 				},
 			},
@@ -334,8 +340,68 @@ func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 	if auths[0].Attributes["websockets"] != "true" {
 		t.Errorf("expected websockets=true, got %s", auths[0].Attributes["websockets"])
 	}
+	if auths[0].Attributes[coreauth.AttributeCodexAlphaSearch] != "true" {
+		t.Errorf("expected codex_alpha_search=true, got %s", auths[0].Attributes[coreauth.AttributeCodexAlphaSearch])
+	}
 	if v, ok := auths[0].Metadata["disable_cooling"].(bool); !ok || !v {
 		t.Errorf("expected disable_cooling=true, got %v", auths[0].Metadata["disable_cooling"])
+	}
+}
+
+func TestConfigSynthesizer_XAIKeys(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			XAIKey: []config.XAIKey{{
+				APIKey:         "xai-key-123",
+				Prefix:         "grok",
+				BaseURL:        "https://api.x.ai/v1",
+				ProxyURL:       "http://proxy.local",
+				Websockets:     true,
+				AlphaSearch:    true,
+				DisableCooling: true,
+				Headers:        map[string]string{"X-Custom": "value"},
+				Models:         []config.XAIModel{{Name: "grok-4.5", Alias: "grok-latest"}},
+			}},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("Synthesize() error = %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auth count = %d, want 1", len(auths))
+	}
+	auth := auths[0]
+	if auth.Provider != "xai" {
+		t.Fatalf("provider = %q, want xai", auth.Provider)
+	}
+	if auth.Label != "xai-apikey" {
+		t.Fatalf("label = %q, want xai-apikey", auth.Label)
+	}
+	if auth.Attributes["websockets"] != "true" {
+		t.Fatalf("websockets = %q, want true", auth.Attributes["websockets"])
+	}
+	if _, exists := auth.Attributes[coreauth.AttributeCodexAlphaSearch]; exists {
+		t.Fatal("xAI auth unexpectedly contains codex_alpha_search")
+	}
+	if auth.Attributes["base_url"] != "https://api.x.ai/v1" {
+		t.Fatalf("base_url = %q, want https://api.x.ai/v1", auth.Attributes["base_url"])
+	}
+	if auth.Attributes["header:X-Custom"] != "value" {
+		t.Fatalf("custom header = %q, want value", auth.Attributes["header:X-Custom"])
+	}
+	if auth.Attributes["models_hash"] == "" {
+		t.Fatal("models_hash is empty")
+	}
+	if auth.ProxyURL != "http://proxy.local" {
+		t.Fatalf("proxy URL = %q, want http://proxy.local", auth.ProxyURL)
+	}
+	if disabled, ok := auth.Metadata["disable_cooling"].(bool); !ok || !disabled {
+		t.Fatalf("disable_cooling = %#v, want true", auth.Metadata["disable_cooling"])
 	}
 }
 
@@ -362,6 +428,9 @@ func TestConfigSynthesizer_CodexKeys_SkipsEmptyAndHeaders(t *testing.T) {
 	}
 	if auths[0].Attributes["header:Authorization"] != "Bearer xyz" {
 		t.Errorf("expected header:Authorization=Bearer xyz, got %s", auths[0].Attributes["header:Authorization"])
+	}
+	if _, exists := auths[0].Attributes[coreauth.AttributeCodexAlphaSearch]; exists {
+		t.Fatal("default alpha-search=false unexpectedly generated codex_alpha_search")
 	}
 }
 
@@ -485,6 +554,9 @@ func TestConfigSynthesizer_OpenAICompat_UsesNamespacedProviderKey(t *testing.T) 
 	}
 	if auth.Attributes["compat_name"] != "kimi" {
 		t.Fatalf("compat_name = %q, want kimi", auth.Attributes["compat_name"])
+	}
+	if auth.Attributes["config_index"] != "0" {
+		t.Fatalf("config_index = %q, want 0", auth.Attributes["config_index"])
 	}
 }
 
@@ -690,6 +762,146 @@ func TestConfigSynthesizer_IDStability(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_RejectsInvalidWeightsForAllAPIKeyTypes(t *testing.T) {
+	invalidWeight := config.MaxCredentialWeight + 1
+	tests := []struct {
+		name     string
+		cfg      *config.Config
+		wantPath string
+	}{
+		{
+			name:     "gemini",
+			cfg:      &config.Config{GeminiKey: []config.GeminiKey{{APIKey: "key", Weight: &invalidWeight}}},
+			wantPath: "gemini-api-key[0].weight",
+		},
+		{
+			name:     "interactions",
+			cfg:      &config.Config{InteractionsKey: []config.GeminiKey{{APIKey: "key", Weight: &invalidWeight}}},
+			wantPath: "interactions-api-key[0].weight",
+		},
+		{
+			name:     "claude",
+			cfg:      &config.Config{ClaudeKey: []config.ClaudeKey{{APIKey: "key", Weight: &invalidWeight}}},
+			wantPath: "claude-api-key[0].weight",
+		},
+		{
+			name:     "codex",
+			cfg:      &config.Config{CodexKey: []config.CodexKey{{APIKey: "key", Weight: &invalidWeight}}},
+			wantPath: "codex-api-key[0].weight",
+		},
+		{
+			name:     "xai",
+			cfg:      &config.Config{XAIKey: []config.XAIKey{{APIKey: "key", Weight: &invalidWeight}}},
+			wantPath: "xai-api-key[0].weight",
+		},
+		{
+			name: "openai compatibility",
+			cfg: &config.Config{OpenAICompatibility: []config.OpenAICompatibility{{
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "key", Weight: &invalidWeight}},
+			}}},
+			wantPath: "openai-compatibility[0].api-key-entries[0].weight",
+		},
+		{
+			name:     "vertex",
+			cfg:      &config.Config{VertexCompatAPIKey: []config.VertexCompatKey{{APIKey: "key", Weight: &invalidWeight}}},
+			wantPath: "vertex-api-key[0].weight",
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			auths, errSynthesize := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+				Config:      testCase.cfg,
+				Now:         time.Now(),
+				IDGenerator: NewStableIDGenerator(),
+			})
+			if errSynthesize == nil {
+				t.Fatal("Synthesize() accepted an invalid credential weight")
+			}
+			if auths != nil {
+				t.Fatalf("Synthesize() auths = %#v, want nil", auths)
+			}
+			if !strings.Contains(errSynthesize.Error(), "synthesize config API key auths: "+testCase.wantPath) {
+				t.Fatalf("Synthesize() error = %q, want contextual path %q", errSynthesize, testCase.wantPath)
+			}
+		})
+	}
+}
+
+func TestConfigSynthesizer_OmittedWeightRemainsUnset(t *testing.T) {
+	auths, errSynthesize := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+		Config:      &config.Config{GeminiKey: []config.GeminiKey{{APIKey: "key"}}},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if errSynthesize != nil {
+		t.Fatalf("Synthesize() error = %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auth count = %d, want 1", len(auths))
+	}
+	if _, exists := auths[0].Attributes[coreauth.AttributeWeight]; exists {
+		t.Fatal("omitted weight was added to synthesized attributes")
+	}
+}
+
+func TestConfigSynthesizer_NormalizesNonPositiveWeightToZero(t *testing.T) {
+	weight := -5
+	auths, errSynthesize := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+		Config:      &config.Config{GeminiKey: []config.GeminiKey{{APIKey: "key", Weight: &weight}}},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if errSynthesize != nil {
+		t.Fatalf("Synthesize() error = %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auth count = %d, want 1", len(auths))
+	}
+	if gotWeight := auths[0].Attributes[coreauth.AttributeWeight]; gotWeight != "0" {
+		t.Fatalf("weight = %q, want 0", gotWeight)
+	}
+}
+
+func TestConfigSynthesizer_PropagatesWeightsForAllAPIKeyTypes(t *testing.T) {
+	weight := func(value int) *int { return &value }
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			GeminiKey:       []config.GeminiKey{{APIKey: "gemini", Weight: weight(1)}},
+			InteractionsKey: []config.GeminiKey{{APIKey: "interactions", Weight: weight(2)}},
+			ClaudeKey:       []config.ClaudeKey{{APIKey: "claude", Weight: weight(3)}},
+			CodexKey:        []config.CodexKey{{APIKey: "codex", Weight: weight(4)}},
+			XAIKey:          []config.XAIKey{{APIKey: "xai", Weight: weight(5)}},
+			OpenAICompatibility: []config.OpenAICompatibility{{
+				Name:    "compat",
+				BaseURL: "https://compat.example.com",
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{{
+					APIKey: "compat",
+					Weight: weight(6),
+				}},
+			}},
+			VertexCompatAPIKey: []config.VertexCompatKey{{APIKey: "vertex", Weight: weight(7)}},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("Synthesize() error = %v", errSynthesize)
+	}
+	if len(auths) != 7 {
+		t.Fatalf("auth count = %d, want 7", len(auths))
+	}
+	for index, auth := range auths {
+		wantWeight := strconv.Itoa(index + 1)
+		if gotWeight := auth.Attributes[coreauth.AttributeWeight]; gotWeight != wantWeight {
+			t.Fatalf("auth[%d] weight = %q, want %q", index, gotWeight, wantWeight)
+		}
+	}
+}
+
 func TestConfigSynthesizer_AllProviders(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{
@@ -702,6 +914,9 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 			},
 			CodexKey: []config.CodexKey{
 				{APIKey: "codex-key"},
+			},
+			XAIKey: []config.XAIKey{
+				{APIKey: "xai-key"},
 			},
 			OpenAICompatibility: []config.OpenAICompatibility{
 				{Name: "compat", BaseURL: "https://compat.api"},
@@ -718,8 +933,8 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(auths) != 5 {
-		t.Fatalf("expected 5 auths, got %d", len(auths))
+	if len(auths) != 6 {
+		t.Fatalf("expected 6 auths, got %d", len(auths))
 	}
 
 	providers := make(map[string]bool)
@@ -727,7 +942,7 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 		providers[a.Provider] = true
 	}
 
-	expected := []string{"gemini", "claude", "codex", "openai-compatible-compat", "vertex"}
+	expected := []string{"gemini", "claude", "codex", "xai", "openai-compatible-compat", "vertex"}
 	for _, p := range expected {
 		if !providers[p] {
 			t.Errorf("expected provider %s not found", p)
