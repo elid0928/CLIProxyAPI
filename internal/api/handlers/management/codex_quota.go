@@ -86,7 +86,7 @@ func (h *Handler) GetCodexQuota(c *gin.Context) {
 		return
 	}
 
-	client := &http.Client{Transport: h.apiCallTransport(nil)}
+	client := &http.Client{Transport: h.apiCallTransport(nil, "")}
 	results := make([]codexQuotaResult, 0, len(paths))
 	for _, path := range paths {
 		result, ok := h.inspectCodexQuotaPath(c.Request.Context(), client, path, includeDisabled)

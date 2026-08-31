@@ -27,6 +27,8 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+const kimiReasoningUnavailable = "[reasoning unavailable]"
+
 // KimiExecutor is a stateless executor for Kimi API using OpenAI-compatible chat completions.
 type KimiExecutor struct {
 	ClaudeExecutor
@@ -47,6 +49,14 @@ func NewKimiExecutor(cfg *config.Config) *KimiExecutor {
 
 // Identifier returns the executor identifier.
 func (e *KimiExecutor) Identifier() string { return "kimi" }
+
+// RequestToFormat reports the upstream request format used after auth selection.
+func (e *KimiExecutor) RequestToFormat(_ cliproxyexecutor.Request, opts cliproxyexecutor.Options) sdktranslator.Format {
+	if opts.SourceFormat == sdktranslator.FormatClaude {
+		return sdktranslator.FormatClaude
+	}
+	return sdktranslator.FormatOpenAI
+}
 
 // PrepareRequest injects Kimi credentials into the outgoing HTTP request.
 func (e *KimiExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
@@ -134,6 +144,7 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	if err != nil {
 		return resp, err
 	}
+	body = normalizeKimiTools(body)
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
 	url := kimiauth.KimiAPIBaseURL + "/v1/chat/completions"
@@ -196,6 +207,9 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve
 	// the original model name in the response for client compatibility.
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, data, &param)
+	if responseFormat == sdktranslator.FormatOpenAIResponse {
+		out = helps.EnsureResponsesUsageDetails(out)
+	}
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -255,6 +269,7 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	if err != nil {
 		return nil, err
 	}
+	body = normalizeKimiTools(body)
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
 	url := kimiauth.KimiAPIBaseURL + "/v1/chat/completions"
@@ -408,7 +423,7 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 			reasoning := msg.Get("reasoning_content")
 			if reasoning.Exists() {
 				reasoningText := reasoning.String()
-				if strings.TrimSpace(reasoningText) != "" {
+				if isUsableKimiReasoning(reasoningText) {
 					latestReasoning = reasoningText
 					hasLatestReasoning = true
 				}
@@ -418,7 +433,7 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 			if toolCalls.Exists() && toolCalls.IsArray() {
 				toolCallItems := toolCalls.Array()
 				if len(toolCallItems) > 0 {
-					if !reasoning.Exists() || strings.TrimSpace(reasoning.String()) == "" {
+					if !reasoning.Exists() || !isUsableKimiReasoning(reasoning.String()) {
 						patches = append(patches, messagePatch{
 							index:        msgIndex,
 							path:         "reasoning_content",
@@ -593,8 +608,13 @@ func isKimiAssistantContentPartEmpty(part gjson.Result) bool {
 	return strings.TrimSpace(part.Raw) == "{}"
 }
 
+func isUsableKimiReasoning(reasoning string) bool {
+	trimmed := strings.TrimSpace(reasoning)
+	return trimmed != "" && trimmed != kimiReasoningUnavailable
+}
+
 func fallbackAssistantReasoning(msg gjson.Result, hasLatest bool, latest string) string {
-	if hasLatest && strings.TrimSpace(latest) != "" {
+	if hasLatest && isUsableKimiReasoning(latest) {
 		return latest
 	}
 
@@ -618,7 +638,7 @@ func fallbackAssistantReasoning(msg gjson.Result, hasLatest bool, latest string)
 		}
 	}
 
-	return "[reasoning unavailable]"
+	return kimiReasoningUnavailable
 }
 
 // Refresh refreshes the Kimi token using the refresh token.
@@ -829,4 +849,85 @@ func normalizeKimiUpstreamModel(model string) string {
 		return normalized + "(" + parsed.RawSuffix + ")"
 	}
 	return normalized
+}
+
+// normalizeKimiTools normalizes tool and legacy function parameter schemas for Moonshot.
+// It resolves and inlines local $ref pointers, strips $defs / definitions, and ensures
+// parameters root objects declare an explicit type: "object".
+func normalizeKimiTools(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	body = normalizeKimiToolList(body, "tools", true)
+	body = normalizeKimiToolList(body, "functions", false)
+	return body
+}
+
+func normalizeKimiToolList(body []byte, arrayKey string, isTools bool) []byte {
+	items := gjson.GetBytes(body, arrayKey)
+	if !items.Exists() || !items.IsArray() {
+		return body
+	}
+	arr := items.Array()
+	if len(arr) == 0 {
+		return body
+	}
+
+	changed := false
+	var updatedItems []string
+	for _, item := range arr {
+		itemRaw := item.Raw
+		var paramPath string
+		if isTools && item.Get("function.parameters").Exists() {
+			paramPath = "function.parameters"
+		} else if item.Get("parameters").Exists() {
+			paramPath = "parameters"
+		}
+
+		if paramPath != "" {
+			rawParams := item.Get(paramPath)
+			if rawParams.IsObject() {
+				normalizedParams := normalizeKimiParametersSchema(rawParams.Raw)
+				if normalizedParams != rawParams.Raw {
+					if updated, errSet := sjson.SetRawBytes([]byte(itemRaw), paramPath, []byte(normalizedParams)); errSet == nil {
+						itemRaw = string(updated)
+						changed = true
+					}
+				}
+			}
+		}
+		updatedItems = append(updatedItems, itemRaw)
+	}
+
+	if !changed {
+		return body
+	}
+
+	out, errSetRaw := sjson.SetRawBytes(body, arrayKey, helps.JoinRawJSONStrings(updatedItems))
+	if errSetRaw != nil {
+		return body
+	}
+	return out
+}
+
+func normalizeKimiParametersSchema(paramsRaw string) string {
+	if strings.TrimSpace(paramsRaw) == "" {
+		return paramsRaw
+	}
+
+	inlined := util.InlineLocalRefs(paramsRaw)
+	paramBytes := []byte(inlined)
+
+	if inlinedDefs := gjson.GetBytes(paramBytes, "$defs"); inlinedDefs.Exists() {
+		paramBytes, _ = sjson.DeleteBytes(paramBytes, "$defs")
+	}
+	if inlinedDefinitions := gjson.GetBytes(paramBytes, "definitions"); inlinedDefinitions.Exists() {
+		paramBytes, _ = sjson.DeleteBytes(paramBytes, "definitions")
+	}
+
+	if rootType := gjson.GetBytes(paramBytes, "type"); !rootType.Exists() {
+		paramBytes, _ = sjson.SetBytes(paramBytes, "type", "object")
+	}
+
+	return string(paramBytes)
 }
