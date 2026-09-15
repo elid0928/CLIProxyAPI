@@ -61,10 +61,10 @@ func TestOpenAICompatExecutorToolResultContentByInputModalities(t *testing.T) {
 					"provider_key": "compat",
 				},
 			}
-			payload := []byte(`{"model":"claude-client","max_tokens":64,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"inspect_image","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"image inspected"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}]}]}`)
+			payload := []byte(`{"model":"claude-client","max_tokens":64,"messages":[{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"inspect_image","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":[{"type":"text","text":"image inspected"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}]}`)
 			req := cliproxyexecutor.Request{Model: "mapped-model", Payload: payload}
 			opts := cliproxyexecutor.Options{
-				SourceFormat:   sdktranslator.FormatClaude,
+				SourceFormat:   sdktranslator.FormatOpenAI,
 				ResponseFormat: sdktranslator.FormatOpenAI,
 				Stream:         tt.stream,
 			}
