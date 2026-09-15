@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -17,6 +18,29 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	log "github.com/sirupsen/logrus"
 )
+
+var initializeUsageBackendsForService = initializeUsageBackends
+
+func initializeUsageBackends(cfg *config.Config) func() {
+	if err := usage.InitializeMySQLPlugin(cfg); err != nil {
+		log.Errorf("failed to initialize MySQL usage plugin: %v", err)
+	}
+	if err := usage.InitializeSQLitePlugin(cfg); err != nil {
+		log.Errorf("failed to initialize SQLite usage plugin: %v", err)
+	}
+
+	var closeOnce sync.Once
+	return func() {
+		closeOnce.Do(func() {
+			if err := usage.CloseMySQLPlugin(); err != nil {
+				log.Errorf("failed to close MySQL usage plugin: %v", err)
+			}
+			if err := usage.CloseSQLitePlugin(); err != nil {
+				log.Errorf("failed to close SQLite usage plugin: %v", err)
+			}
+		})
+	}
+}
 
 // StartService builds and runs the proxy service using the exported SDK.
 // It creates a new proxy service instance, sets up signal handling for graceful shutdown,
@@ -32,27 +56,9 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 
 // StartServiceWithPluginHost builds and runs the proxy service with a shared plugin host.
 func StartServiceWithPluginHost(cfg *config.Config, configPath string, localPassword string, host *pluginhost.Host, serverOptions ...api.ServerOption) {
-	// Initialize MySQL usage plugin if configured
-	if err := usage.InitializeMySQLPlugin(cfg); err != nil {
-		log.Errorf("failed to initialize MySQL usage plugin: %v", err)
-		// Don't fail startup - continue without MySQL persistence
-	}
+	closeUsageBackends := initializeUsageBackendsForService(cfg)
+	defer closeUsageBackends()
 
-	// Initialize SQLite usage plugin if configured
-	if err := usage.InitializeSQLitePlugin(cfg); err != nil {
-		log.Errorf("failed to initialize SQLite usage plugin: %v", err)
-		// Don't fail startup - continue without SQLite persistence
-	}
-
-	// Ensure plugins are closed on shutdown
-	defer func() {
-		if err := usage.CloseMySQLPlugin(); err != nil {
-			log.Errorf("failed to close MySQL usage plugin: %v", err)
-		}
-		if err := usage.CloseSQLitePlugin(); err != nil {
-			log.Errorf("failed to close SQLite usage plugin: %v", err)
-		}
-	}()
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
@@ -97,6 +103,8 @@ func StartServiceBackground(cfg *config.Config, configPath string, localPassword
 
 // StartServiceBackgroundWithPluginHost starts the proxy service with a shared plugin host.
 func StartServiceBackgroundWithPluginHost(cfg *config.Config, configPath string, localPassword string, host *pluginhost.Host, serverOptions ...api.ServerOption) (cancel func(), done <-chan struct{}) {
+	closeUsageBackends := initializeUsageBackendsForService(cfg)
+
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
@@ -114,12 +122,14 @@ func StartServiceBackgroundWithPluginHost(cfg *config.Config, configPath string,
 	service, err := builder.Build()
 	if err != nil {
 		log.Errorf("failed to build proxy service: %v", err)
+		closeUsageBackends()
 		close(doneCh)
 		return cancelFn, doneCh
 	}
 
 	go func() {
 		defer close(doneCh)
+		defer closeUsageBackends()
 		if err := service.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Errorf("proxy service exited with error: %v", err)
 		}
