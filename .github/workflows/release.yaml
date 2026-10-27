@@ -117,12 +117,6 @@ jobs:
             goarch: amd64
             asset_arch: amd64
             archive_format: zip
-          - target: windows-arm64
-            runner: windows-11-arm
-            goos: windows
-            goarch: arm64
-            asset_arch: aarch64
-            archive_format: zip
     steps:
       - uses: actions/checkout@v6
         with:
