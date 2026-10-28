@@ -933,3 +933,46 @@ func TestV8SecretHashResolvesReferences(t *testing.T) {
 		})
 	}
 }
+
+func TestV8PreservesUsageBackendAndCodexCredentialConfigs(t *testing.T) {
+	raw := []byte(`config-version: 8
+server:
+  port: 8317
+usage-mysql:
+  enable: true
+  dsn: "user:pass@tcp(127.0.0.1:3306)/cliproxy?parseTime=true"
+  batch-size: 100
+  flush-interval-seconds: 5
+  load-history-days: 30
+  enable-daily-stats: true
+usage-sqlite:
+  enable: false
+  db-path: "/tmp/usage.db"
+codex-credential-check-interval-seconds: 600
+codex-credential-delete-threshold-percent: 15
+`)
+	if err := ValidateV8Config(raw); err != nil {
+		t.Fatalf("ValidateV8Config rejected custom usage/codex fields: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.UsageMySQL.Enable || cfg.UsageMySQL.DSN == "" || cfg.CodexCredentialCheckIntervalSeconds != 600 || cfg.CodexCredentialDeleteThresholdPercent != 15 {
+		t.Fatalf("unexpected loaded config: %+v", cfg)
+	}
+	if err := SaveConfigPreserveComments(path, cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.UsageMySQL.Enable || reloaded.UsageMySQL.DSN != cfg.UsageMySQL.DSN || reloaded.CodexCredentialCheckIntervalSeconds != 600 || reloaded.CodexCredentialDeleteThresholdPercent != 15 {
+		t.Fatalf("usage-mysql or codex credential settings lost after v8 save: %+v", reloaded)
+	}
+}

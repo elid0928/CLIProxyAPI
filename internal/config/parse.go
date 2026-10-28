@@ -102,6 +102,15 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
 	}
+	if cfg.CodexCredentialCheckIntervalSeconds < 0 {
+		cfg.CodexCredentialCheckIntervalSeconds = 0
+	}
+	if cfg.CodexCredentialDeleteThresholdPercent < 0 {
+		cfg.CodexCredentialDeleteThresholdPercent = 0
+	}
+	if cfg.CodexCredentialDeleteThresholdPercent == 0 {
+		cfg.CodexCredentialDeleteThresholdPercent = 10.0
+	}
 
 	cfg.NormalizePluginsConfig()
 	cfg.NormalizeClaudeConfig()

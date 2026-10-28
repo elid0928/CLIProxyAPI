@@ -433,13 +433,15 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		}
 	}
 
-	// Check integer defaults
-	if node.Kind == yaml.ScalarNode && node.Tag == "!!int" {
+	// Check integer/float defaults
+	if node.Kind == yaml.ScalarNode && (node.Tag == "!!int" || node.Tag == "!!float") {
 		switch fullPath {
 		case "error-logs-max-files":
 			return node.Value == "10"
 		case "claude.session-date-pin-days":
 			return node.Value == strconv.Itoa(DefaultClaudeSessionDatePinDays)
+		case "codex-credential-delete-threshold-percent":
+			return node.Value == "10" || node.Value == "10.0"
 		}
 	}
 
